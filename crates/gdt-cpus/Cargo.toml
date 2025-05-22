@@ -1,0 +1,74 @@
+[package]
+name = "gdt-cpus"
+version = "25.5.0"
+edition = "2024"
+authors = ["Artur Wyszyński <artur.wyszynski@wildpixelgames.com>"]
+description = "Game Developer's Toolkit for CPU Management"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/WildPixelGames/gdt-cpus"
+keywords = ["gamedev", "cpu", "affinity", "performance", "threading"]
+categories = ["game-engines", "hardware-support"]
+readme = "../../README.md"
+
+[dependencies]
+# Core dependencies
+thiserror = "2.0.12" # Error handling
+log = "0.4.27"       # Logging
+bitflags = "2.9.1"   # Bit flags for CPU features
+
+# Platform-specific dependencies (enabled conditionally)
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+raw-cpuid = "11.5.0" # CPU ID information for x86_64
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61.1", features = [
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_Foundation",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Registry",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.172"
+nix = "0.30.1"   # Unix API calls
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.172"
+mach-sys = "0.5.4"         # Mach kernel interfaces
+core-foundation = "0.10.0" # Core Foundation interfaces
+
+[dev-dependencies]
+env_logger = "0.11.8" # Environment-based logging
+rand = "0.9.1"        # Random number generation for tests
+flate2 = "1.1.1"      # Compression support for tests
+fastrand = "2.3.0"    # Fast random number generation for tests
+
+[features]
+default = []
+serde = ["dep:serde", "bitflags/serde"] # Serialization support
+
+[dependencies.serde]
+version = "1.0.219"
+features = ["derive"]
+optional = true
+
+[[example]]
+name = "basic_info"
+path = "examples/basic_info.rs"
+
+[[example]]
+name = "audio_latency"
+path = "examples/audio_latency.rs"
+
+[[example]]
+name = "frame_jitter"
+path = "examples/frame_jitter.rs"
+
+[[example]]
+name = "parallel_tasks"
+path = "examples/parallel_tasks.rs"
+
+[[example]]
+name = "streaming_pipeline"
+path = "examples/streaming_pipeline.rs"

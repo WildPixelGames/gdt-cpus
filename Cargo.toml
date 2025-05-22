@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["crates/gdt-cpus", "crates/gdt-cpus-sys"]
