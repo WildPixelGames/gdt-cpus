@@ -15,7 +15,7 @@ build = "build.rs"
 rust-version = "1.86"
 
 [dependencies]
-gdt-cpus = { path = "../gdt-cpus" }
+gdt-cpus = "25.5.0"
 libc = "0.2.172"
 
 [build-dependencies]
