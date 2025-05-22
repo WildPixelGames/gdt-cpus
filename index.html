@@ -3,10 +3,32 @@
 
 <head>
   <meta charset="UTF-8">
+  <meta name="author" content="Wild Pixel Games">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description"
+    content="Rust crate for CPU affinity, thread pinning, and hybrid-core management. Built for game engines, real-time sims, and audio pipelines. Cross-platform: Windows, Linux, macOS.">
+  <meta name="keywords"
+    content="Rust, thread affinity, CPU pinning, hybrid cores, thread priority, real-time systems, game engines, simulations, audio processing, cross-platform, Windows, Linux, macOS, Apple Silicon, P-cores, E-cores, gdt-cpus">
+
+  <!-- Open Graph / Facebook -->
+  <meta property="og:locale" content="en_US">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://wildpixelgames.github.io/gdt-cpus/">
+  <meta property="og:title" content="gdt-cpus – Rust CPU Affinity & Thread Pinning">
+  <meta property="og:description"
+    content="Thread affinity and hybrid-core control in Rust. Ideal for games, sims, and real-time workloads.">
+  <meta property="og:image" content="https://wildpixelgames.github.io/gdt-cpus/social-card.png">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="gdt-cpus – Rust CPU Affinity & Thread Pinning">
+  <meta name="twitter:description" content="Control threads in real-time with Rust. Cross-platform, no bloat.">
+  <meta name="twitter:image" content="https://wildpixelgames.github.io/gdt-cpus/social-card.png">
+
   <title>gdt-cpus: Pin it. Prioritize it. Dominate it.</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+  <link rel="canonical" href="https://wildpixelgames.github.io/gdt-cpus/">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1096,6 +1118,13 @@
       <p class="text-gray-500 text-xs"> &copy; <span id="yearRange"></span> Wild Pixel Games. We know CPUs.</p>
     </div>
   </footer>
+
+  <div style="display: none;">
+    gdt-cpus is a Rust library for thread affinity, CPU pinning, and hybrid-core scheduling.
+    Built for real-time applications including game engines, audio pipelines, and simulations.
+    Supports Windows, Linux, macOS (Intel and Apple Silicon). Minimal dependencies.
+    Use it to detect and classify P-cores / E-cores, set thread priorities, and expose full CPU topology.
+  </div>
 
   <script>
     let audioLatencyChartInstance, frameJitterChartInstance, parallelTasksChartInstance, streamingPipelineChartInstance, comparisonRadarChartInstance;
