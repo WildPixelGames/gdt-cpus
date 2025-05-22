@@ -1,15 +1,18 @@
 [package]
 name = "gdt-cpus-sys"
 version = "25.5.0"
-edition = "2024"
 authors = ["Artur Wyszyński <artur.wyszynski@wildpixelgames.com>"]
-description = "Game Developer's Toolkit for CPU Management"
 license = "MIT OR Apache-2.0"
+description = "Game Developer's Toolkit for CPU Management"
+homepage = "https://github.com/WildPixelGames/gdt-cpus"
 repository = "https://github.com/WildPixelGames/gdt-cpus"
-keywords = ["gamedev", "cpu", "affinity", "performance", "threading"]
-categories = ["game-engines", "hardware-support"]
+documentation = "https://docs.rs/gdt-cpus"
+edition = "2024"
 readme = "../../README.md"
+keywords = ["gamedev", "cpu", "affinity", "performance", "threading"]
+categories = ["game-engines", "concurrency", "hardware-support"]
 build = "build.rs"
+rust-version = "1.86"
 
 [dependencies]
 gdt-cpus = { path = "../gdt-cpus" }
