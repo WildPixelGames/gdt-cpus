@@ -1,0 +1,1382 @@
+<!DOCTYPE html>
+<html lang="en" class="">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gdt-cpus: Pin it. Prioritize it. Dominate it.</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --wpg-orange: #ffa403;
+      --wpg-dark-gray: #292929;
+      --wpg-light-gray-text: #E5E7EB;
+      --wpg-card-bg-dark: #3a3a3a;
+      --wpg-card-border-dark: #4a4a4a;
+      --wpg-section-bg-darker: #333333;
+      --wpg-hero-gradient-start-dark: #1f1f1f;
+      --wpg-hero-gradient-end-dark: var(--wpg-dark-gray);
+      --wpg-cool-blue: #4A90E2;
+      --wpg-cool-blue-dark: #3A7BC8;
+      --wpg-green-sea-for-radar: #16a085;
+      --wpg-grey-for-radar: #7f8c8d;
+
+
+      /* Default (Light Mode) */
+      --page-bg: #ffffff;
+      --card-bg: #ffffff;
+      --text-primary: #1f2937;
+      --text-secondary: #6b7280;
+      --accent-primary: var(--wpg-orange);
+      --border-color: #e5e7eb;
+      --nav-bg: rgba(255, 255, 255, 0.9);
+      --nav-text: #1f2937;
+      --nav-text-hover: var(--wpg-orange);
+      --nav-active-text: var(--wpg-orange);
+      --nav-active-border: var(--wpg-orange);
+      --nav-shadow: rgba(0, 0, 0, 0.05);
+      --section-title-color: #111827;
+      --inline-code-bg: #f3f4f6;
+      --inline-code-text: var(--wpg-orange);
+      --inline-code-border: #e5e7eb;
+      --footer-bg: #1f2937;
+      --footer-text: var(--wpg-light-gray-text);
+      --footer-code-bg: var(--wpg-dark-gray);
+      --footer-code-text: var(--wpg-orange);
+      --section-dark-bg-light-mode: #f9fafb;
+      --hero-gradient-start-light: #f3f4f6;
+      --hero-gradient-end-light: var(--page-bg);
+
+      --chart-grid-color: #E2E8F0;
+      --chart-tick-color: #4A5568;
+      --chart-legend-color: #1f2937;
+      --chart-bar-bg-1: var(--wpg-orange);
+      --chart-bar-bg-2: var(--wpg-cool-blue);
+      --chart-bar-bg-3: #e69500;
+      --chart-bar-bg-4: var(--wpg-cool-blue-dark);
+      --chart-border-color-1: #e69500;
+      --chart-border-color-2: var(--wpg-cool-blue-dark);
+    }
+
+    html.dark {
+      --page-bg: var(--wpg-dark-gray);
+      --card-bg: var(--wpg-card-bg-dark);
+      --text-primary: var(--wpg-light-gray-text);
+      --text-secondary: #9ca3af;
+      --border-color: var(--wpg-card-border-dark);
+      --nav-bg: rgba(41, 41, 41, 0.85);
+      --nav-text: var(--wpg-light-gray-text);
+      --nav-shadow: rgba(255, 164, 3, 0.1);
+      --section-title-color: var(--wpg-orange);
+      --inline-code-bg: #4b5563;
+      --inline-code-text: var(--wpg-orange);
+      --inline-code-border: #374151;
+      --footer-bg: #111827;
+      --footer-text: #d1d5db;
+      --footer-code-bg: var(--wpg-card-bg-dark);
+      --section-dark-bg-light-mode: var(--wpg-section-bg-darker);
+
+      --chart-grid-color: #4b5563;
+      --chart-tick-color: #d1d5db;
+      --chart-legend-color: var(--wpg-light-gray-text);
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: var(--page-bg);
+      color: var(--text-primary);
+      transition: background-color 0.3s, color 0.3s;
+      scroll-behavior: smooth;
+      padding-top: 4rem;
+    }
+
+    .accent-color {
+      color: var(--accent-primary);
+    }
+
+    .bg-accent-color {
+      background-color: var(--accent-primary);
+    }
+
+    .border-accent-color {
+      border-color: var(--accent-primary);
+    }
+
+    .sticky-nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      width: 100%;
+      z-index: 50;
+      background-color: var(--nav-bg);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      box-shadow: 0 2px 4px var(--nav-shadow);
+      transition: background-color 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .nav-link {
+      transition: color 0.3s ease, border-color 0.3s ease;
+      color: var(--nav-text);
+      padding: 0.5rem 0.25rem;
+    }
+
+    .nav-link:hover {
+      color: var(--nav-text-hover);
+    }
+
+    .nav-link.active {
+      color: var(--nav-active-text);
+      font-weight: 700;
+      border-bottom: 2px solid var(--nav-active-border);
+    }
+
+    .theme-toggle-button {
+      background-color: transparent;
+      border: 1px solid var(--wpg-orange);
+      color: var(--wpg-orange);
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.375rem;
+      cursor: pointer;
+      font-size: 1.25rem;
+      line-height: 1;
+      transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+    }
+
+    .theme-toggle-button:hover {
+      background-color: var(--wpg-orange);
+      color: var(--page-bg);
+    }
+
+    html.dark .theme-toggle-button {
+      border-color: var(--wpg-orange);
+      color: var(--wpg-orange);
+    }
+
+    html.dark .theme-toggle-button:hover {
+      background-color: var(--wpg-orange);
+      color: var(--wpg-dark-gray);
+    }
+
+    .section-title {
+      font-weight: 900;
+      font-size: 2.25rem;
+      line-height: 1.2;
+      color: var(--section-title-color);
+      text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.1);
+    }
+
+    html.dark .section-title {
+      text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.3);
+    }
+
+    .card {
+      background-color: var(--card-bg);
+      border-radius: 0.75rem;
+      border: 1px solid var(--border-color);
+      padding: 1.5rem;
+      transition: transform 0.3s ease, box-shadow 0.3s ease, background-color 0.3s ease, border-color 0.3s ease;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.07);
+    }
+
+    html.dark .card:hover {
+      box-shadow: 0 10px 20px rgba(255, 164, 3, 0.15);
+    }
+
+    /* Centering content within specific cards */
+    .feature-card-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      /* Center horizontally */
+      text-align: center;
+      /* Center text */
+    }
+
+    .feature-card-content .flex.items-center {
+      /* For icon + title row */
+      justify-content: center;
+      /* Center icon and title row if it's flex */
+    }
+
+
+    .btn {
+      display: inline-block;
+      padding: 0.75rem 1.5rem;
+      border-radius: 0.5rem;
+      font-weight: 600;
+      transition: background-color 0.3s ease, transform 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+      text-align: center;
+    }
+
+    .btn-primary {
+      background-color: var(--accent-primary);
+      color: var(--wpg-dark-gray);
+    }
+
+    html.dark .btn-primary {
+      color: #1a1a1a;
+    }
+
+    .btn-primary:hover {
+      background-color: #e69500;
+      transform: scale(1.05);
+    }
+
+    .btn-secondary {
+      background-color: transparent;
+      color: var(--accent-primary);
+      border: 2px solid var(--accent-primary);
+    }
+
+    .btn-secondary:hover:not([disabled]) {
+      /* Ensure hover effect only if not disabled */
+      background-color: rgba(255, 164, 3, 0.1);
+      transform: scale(1.05);
+    }
+
+    html.dark .btn-secondary:hover:not([disabled]) {
+      color: var(--wpg-light-gray-text);
+    }
+
+    .btn[disabled] {
+      /* Style for disabled buttons */
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+
+    .icon-glow {
+      filter: drop-shadow(0 0 5px var(--accent-primary));
+    }
+
+    .inline-code {
+      background-color: var(--inline-code-bg);
+      color: var(--inline-code-text);
+      padding: 0.1em 0.4em;
+      border-radius: 0.25rem;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.9em;
+      border: 1px solid var(--inline-code-border);
+      transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+    }
+
+    .chart-container {
+      position: relative;
+      width: 100%;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+      height: 300px;
+    }
+
+    @media (min-width: 768px) {
+      .chart-container {
+        height: 350px;
+      }
+    }
+
+    .comparison-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .comparison-table th,
+    .comparison-table td {
+      border: 1px solid var(--border-color);
+      padding: 0.75rem;
+      text-align: left;
+      transition: border-color 0.3s ease;
+    }
+
+    .comparison-table th {
+      background-color: var(--inline-code-bg);
+      color: var(--text-primary);
+      font-weight: 700;
+      transition: background-color 0.3s ease, color 0.3s ease;
+    }
+
+    html.dark .comparison-table th {
+      background-color: #4b5563;
+    }
+
+    .swot-item {
+      background-color: var(--card-bg);
+      border-left: 4px solid var(--accent-primary);
+      padding: 1rem;
+      border-radius: 0 0.5rem 0.5rem 0;
+      transition: background-color 0.3s ease;
+    }
+
+    .readme-quote {
+      font-family: 'Georgia', serif;
+      font-style: italic;
+      background-color: var(--section-dark-bg-light-mode);
+      border-radius: 0 0.25rem 0.25rem 0;
+      color: var(--text-secondary);
+      border-left: 4px solid var(--accent-primary);
+      padding: .75rem 1.25rem .75rem 2rem;
+      margin: 1.5rem auto;
+      /* Centered with auto margins */
+      max-width: 75ch;
+      /* Control width */
+      transition: color 0.3s ease, border-color 0.3s ease;
+    }
+
+    @keyframes fadeInDown {
+      from {
+        opacity: 0;
+        transform: translateY(-20px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .animate-fadeInDown {
+      animation: fadeInDown 0.8s ease-out forwards;
+    }
+
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .animate-fadeInUp {
+      animation: fadeInUp 0.8s ease-out forwards;
+    }
+
+    .animate-fadeInUp.is-visible {
+      animation: fadeInUp 0.8s ease-out forwards;
+    }
+
+    .bg-default-section {
+      background-color: var(--page-bg);
+    }
+
+    .bg-darker-section {
+      background-color: var(--section-dark-bg-light-mode);
+    }
+
+    html.dark .bg-darker-section {
+      background-color: var(--wpg-section-bg-darker);
+    }
+
+    .bg-engineered-by-gradient {
+      background: linear-gradient(to bottom, var(--hero-gradient-start-light) 0%, var(--hero-gradient-end-light) 100%);
+    }
+
+    html.dark .bg-engineered-by-gradient {
+      background: linear-gradient(to bottom, var(--wpg-hero-gradient-start-dark) 0%, var(--wpg-hero-gradient-end-dark) 100%);
+    }
+
+    /* Theme-specific WPG logos */
+    .wpg-logo-light {
+      display: block;
+    }
+
+    .wpg-logo-dark {
+      display: none;
+    }
+
+    html.dark .wpg-logo-light {
+      display: none;
+    }
+
+    html.dark .wpg-logo-dark {
+      display: block;
+    }
+
+    /* GDT Ecosystem Card Styling (from Voxelis) */
+    .gdt-card-title {
+      font-size: 1.75rem;
+      font-weight: 800;
+      color: var(--accent-primary);
+      margin-bottom: 0.75rem;
+    }
+
+    .gdt-card-quote {
+      font-style: italic;
+      color: var(--text-secondary);
+      border-left: 3px solid var(--wpg-orange);
+      /* Using var for consistency */
+      padding-left: 0.75rem;
+      margin-top: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .you-are-here-badge {
+      display: inline-block;
+      background-color: var(--accent-primary);
+      color: var(--wpg-dark-gray);
+      padding: 0.2rem 0.6rem;
+      font-size: 0.75rem;
+      font-weight: bold;
+      border-radius: 0.25rem;
+      margin-left: 0.5rem;
+      vertical-align: middle;
+    }
+
+    html.dark .you-are-here-badge {
+      color: #1a1a1a;
+    }
+  </style>
+</head>
+
+<body class="antialiased">
+
+  <nav id="navbar" class="sticky-nav py-3 px-4 md:px-8">
+    <div
+      class="container mx-auto flex flex-wrap justify-center items-center space-x-1 sm:space-x-2 md:space-x-3 text-xs sm:text-sm">
+      <a href="#intro" class="nav-link">Intro</a>
+      <a href="#engineered-by" class="nav-link">About</a>
+      <a href="#cpu-mess" class="nav-link">The Mess</a>
+      <a href="#cpu-whisperer" class="nav-link">The Fix</a>
+      <a href="#gdt-ecosystem" class="nav-link">Ecosystem</a>
+      <a href="#performance" class="nav-link">Proof</a>
+      <a href="#architecture" class="nav-link">Guts</a>
+      <a href="#hybrid-dominance" class="nav-link">Hybrid</a>
+      <a href="#comparisons" class="nav-link">vs. Others</a>
+      <a href="#swot" class="nav-link">SWOT</a>
+      <a href="#versioning" class="nav-link">Versioning</a>
+      <a href="#contributing" class="nav-link">Contribute</a>
+      <a href="#get-started" class="nav-link">Get It</a>
+      <button id="theme-toggle-btn" class="theme-toggle-button ml-2 md:ml-4">
+        <span id="theme-icon">🌙</span>
+      </button>
+    </div>
+  </nav>
+
+  <header id="intro" class="py-20 md:py-32 bg-default-section">
+    <div class="container mx-auto px-6 text-center">
+      <div class="text-6xl mt-8 mb-8 animate-fadeInDown text-[var(--accent-primary)] icon-glow"><i
+          class="fas fa-microchip"></i></div>
+      <h1 class="text-4xl md:text-6xl font-black text-[var(--text-primary)] mb-6 animate-fadeInDown"
+        style="animation-delay: 0.2s;">
+        gdt-cpus
+      </h1>
+      <p class="text-2xl md:text-3xl font-bold text-[var(--accent-primary)] mb-4 animate-fadeInDown"
+        style="animation-delay: 0.3s;">
+        Pin it. Prioritize it. Dominate it.
+      </p>
+      <p class="text-lg md:text-xl text-[var(--text-secondary)] mb-6 max-w-3xl mx-auto animate-fadeInDown"
+        style="animation-delay: 0.4s;">
+        Your CPU has P-cores, E-cores, caches galore. The OS? It's trying its best. Bless its heart. <strong
+          class="text-[var(--text-primary)]"><code class="inline-code">gdt-cpus</code> gives YOU the reins.</strong>
+      </p>
+      <blockquote class="readme-quote animate-fadeInDown" style="animation-delay: 0.5s;">
+        Side effects may include actual performance gains and a sudden urge to optimize everything.
+      </blockquote>
+      <div class="space-y-4 md:space-y-0 md:space-x-4 mt-10 animate-fadeInDown" style="animation-delay: 0.6s;">
+        <a href="https://github.com/WildPixelGames/gdt-cpus" target="_blank" class="btn btn-primary text-lg">
+          <i class="fab fa-github mr-2"></i> View on GitHub
+        </a>
+        <a href="#get-started" class="btn btn-secondary text-lg">
+          <i class="fas fa-rocket mr-2"></i> Get Started
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="engineered-by" class="py-16 bg-engineered-by-gradient">
+      <div
+        class="container mx-auto px-6 flex flex-col md:flex-row items-center justify-center text-center md:text-left gap-8 animate-fadeInUp">
+        <div>
+          <h2 class="text-2xl md:text-3xl font-bold text-[var(--text-primary)] mb-4">
+            gdt-cpus was engineered by a <span class="accent-color">tiny studio</span><br class="hidden md:inline" />
+            with very big voxel dreams.
+          </h2>
+          <p class="text-[var(--text-secondary)] text-lg leading-relaxed max-w-xl mx-auto md:mx-0">
+            Obsessed with world-building tech, simulation engines, and questionable life choices.
+          </p>
+        </div>
+        <div class="shrink-0">
+          <img src="wpg-logo-big.png" alt="Wild Pixel Games Logo - Light Theme"
+            class="wpg-logo-light w-80 md:w-112 max-w-xs mx-auto md:mx-0" />
+          <img src="wpg-logo-big-white.png" alt="Wild Pixel Games Logo - Dark Theme"
+            class="wpg-logo-dark w-80 md:w-112 max-w-xs mx-auto md:mx-0" />
+        </div>
+      </div>
+    </section>
+
+    <section id="cpu-mess" class="py-12 md:py-16 bg-default-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp">The CPU Mess (Why Your OS Needs a
+          Babysitter)</h2>
+        <div class="max-w-3xl mx-auto animate-fadeInUp" style="animation-delay: 0.2s;">
+          <p class="text-lg mb-6 leading-relaxed text-[var(--text-secondary)]">
+            Modern CPUs? They're not simple. You've got Performance-cores for the heavy lifting, Efficiency-cores for
+            the chores, and a cache hierarchy that'd make a librarian weep. The OS scheduler is supposed to manage this
+            circus, but for high-performance apps like games? It's often just guessing, leaving your critical threads on
+            E-cores or bouncing them around like a caffeinated squirrel. Result? Lag, stutter, and wasted potential.
+          </p>
+          <div
+            class="card mt-6 p-4 bg-[var(--card-bg)] border border-[var(--border-color)] transition-colors duration-300">
+            <h3 class="text-xl font-semibold mb-3 text-[var(--accent-primary)]">OS Scheduler's Top Blunders:</h3>
+            <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]">
+              <li><span class="font-semibold text-[var(--text-primary)]">Core Confusion:</span> "Is this P-core
+                important? Nah, let's put the background logger on it."</li>
+              <li><span class="font-semibold text-[var(--text-primary)]">Thread Ping-Pong:</span> Your render thread
+                visiting more cores than a tourist. Cache coherence? What's that?</li>
+              <li><span class="font-semibold text-[var(--text-primary)]">Priority "Suggestions":</span> Your "critical"
+                thread treated like a mild inconvenience.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cpu-whisperer" class="py-12 md:py-16 bg-darker-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp"><code class="inline-code">gdt-cpus</code>:
+          The CPU Whisperer Your Code Deserves</h2>
+        <p class="text-lg mb-8 leading-relaxed text-center text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.1s;">
+          Stop begging the OS. <code class="inline-code">gdt-cpus</code> hands you the keys to the kingdom. We're
+          talking deep CPU intel and surgical thread control, all wrapped in a Rust-idiomatic API that doesn't suck.
+        </p>
+        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+          <div class="card p-6 animate-fadeInUp h-full" style="animation-delay: 0.1s;">
+            <div class="feature-card-content">
+              <div class="flex items-center mb-3">
+                <i class="fas fa-sitemap text-3xl accent-color mr-3 icon-glow"></i>
+                <h3 class="text-2xl font-bold text-[var(--text-primary)]">Full Topology</h3>
+              </div>
+              <p class="text-[var(--text-secondary)]">Vendor, model, sockets, cores, caches. Know your hardware.</p>
+            </div>
+          </div>
+          <div class="card p-6 animate-fadeInUp h-full" style="animation-delay: 0.2s;">
+            <div class="feature-card-content">
+              <div class="flex items-center mb-3">
+                <i class="fas fa-bolt text-3xl accent-color mr-3 icon-glow"></i>
+                <h3 class="text-2xl font-bold text-[var(--text-primary)]">Hybrid Genius</h3>
+              </div>
+              <p class="text-[var(--text-secondary)]">P-cores, E-cores. We see them. We use them. Properly.</p>
+            </div>
+          </div>
+          <div class="card p-6 animate-fadeInUp h-full" style="animation-delay: 0.3s;">
+            <div class="feature-card-content">
+              <div class="flex items-center mb-3">
+                <i class="fas fa-thumbtack text-3xl accent-color mr-3 icon-glow"></i>
+                <h3 class="text-2xl font-bold text-[var(--text-primary)]">Thread Pinning</h3>
+              </div>
+              <p class="text-[var(--text-secondary)]">Tell that critical thread to STAY. PUT. (Platform permitting,
+                Apple.)</p>
+            </div>
+          </div>
+          <div class="card p-6 animate-fadeInUp h-full" style="animation-delay: 0.4s;">
+            <div class="feature-card-content">
+              <div class="flex items-center mb-3">
+                <i class="fas fa-traffic-light text-3xl accent-color mr-3 icon-glow"></i>
+                <h3 class="text-2xl font-bold text-[var(--text-primary)]">Real Priorities</h3>
+              </div>
+              <p class="text-[var(--text-secondary)]">From "meh, background" to "TIME CRITICAL, GET OUT OF THE WAY!"</p>
+            </div>
+          </div>
+          <div class="card p-6 animate-fadeInUp h-full" style="animation-delay: 0.5s;">
+            <div class="feature-card-content">
+              <div class="flex items-center mb-3">
+                <i class="fas fa-link text-3xl accent-color mr-3 icon-glow"></i>
+                <h3 class="text-2xl font-bold text-[var(--text-primary)]">C FFI Ready</h3>
+              </div>
+              <p class="text-[var(--text-secondary)]">Got legacy C/C++? <code class="inline-code">gdt-cpus-sys</code>
+                lets them taste Rust power. No excuses.</p>
+            </div>
+          </div>
+          <div class="card p-6 animate-fadeInUp h-full" style="animation-delay: 0.6s;">
+            <div class="feature-card-content">
+              <div class="flex items-center mb-3">
+                <i class="fab fa-rust text-3xl accent-color mr-3 icon-glow"></i>
+                <h3 class="text-2xl font-bold text-[var(--text-primary)]">Rust Power</h3>
+              </div>
+              <p class="text-[var(--text-secondary)]">Safety and performance you know and love, now for your CPU.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="gdt-ecosystem" class="py-12 md:py-16 bg-default-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-4 md:mb-6 animate-fadeInUp">Part of the <span class="accent-color">GDT
+            Ecosystem</span></h2>
+        <p class="text-xl md:text-2xl font-semibold text-[var(--text-primary)] text-center mb-4 animate-fadeInUp"
+          style="animation-delay: 0.1s;">
+          AAA-grade open-source, forged in production fire.
+        </p>
+        <p class="text-lg text-center text-[var(--text-secondary)] mb-10 max-w-3xl mx-auto animate-fadeInUp"
+          style="animation-delay: 0.2s;">
+          Part of the Game Developer’s Toolkit — libraries built with years of experience from top-tier studios, now
+          yours to use freely.
+        </p>
+        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8 items-stretch">
+          <div class="card p-8 animate-fadeInUp h-full" style="animation-delay: 0.2s;">
+            <div class="flex items-center mb-4">
+              <i class="fas fa-microchip text-4xl accent-color mr-4 icon-glow"></i>
+              <h3 class="gdt-card-title">gdt-cpus <span class="you-are-here-badge"><i
+                    class="fas fa-map-marker-alt mr-1"></i>You are here</span></h3>
+            </div>
+            <p class="text-[var(--text-secondary)] mb-3">Pin it. Prioritize it. Dominate it. Your CPU has P-cores,
+              E-cores, caches galore. The OS? It's trying its best. Bless its heart. <code
+                class="inline-code">gdt-cpus</code> gives YOU the reins.</p>
+            <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]/80 mb-4 pl-2">
+              <li>Full Topology: Vendor, model, sockets, cores, caches.</li>
+              <li>Hybrid Genius: P-cores, E-cores. We see them. We use them.</li>
+              <li>Thread Pinning & Real Priorities: Surgical thread control.</li>
+            </ul>
+            <p class="gdt-card-quote">"My CPU used to cry itself to sleep. Then I found <code
+                class="inline-code">gdt-cpus</code>." – A Very Smart Developer</p>
+            <a href="https://github.com/WildPixelGames/gdt-cpus" target="_blank"
+              class="btn btn-secondary mt-auto self-start text-sm">Explore gdt-cpus <i
+                class="fas fa-arrow-right ml-1"></i></a>
+          </div>
+
+          <div class="card p-8 animate-fadeInUp h-full" style="animation-delay: 0.3s;">
+            <div class="flex items-center mb-4">
+              <i class="fas fa-rocket text-4xl accent-color mr-4 icon-glow"></i>
+              <h3 class="gdt-card-title">gdt-jobs</h3>
+            </div>
+            <p class="text-[var(--text-secondary)] mb-3">Jobs That Don't Mess Around. High-performance task execution
+              built for games and sims needing serious parallelism. Born out of necessity, open-sourced out of <del
+                class="opacity-70">spite</del> love.</p>
+            <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]/80 mb-4 pl-2">
+              <li>7 Priority Levels: Because "urgent" and "REALLY URGENT" are different.</li>
+              <li>P/E Core Aware Scheduling: Squeezes hybrid CPUs for all they're worth.</li>
+              <li>Flexible Task Graphs: Define explicit task graphs, not chaos.</li>
+            </ul>
+            <p class="gdt-card-quote">"If your thread pool doesn't scare your CPU a little, is it even trying?"</p>
+            <a href="https://github.com/WildPixelGames/gdt-jobs" target="_blank"
+              class="btn btn-secondary mt-auto self-start text-sm">Learn about gdt-jobs <i
+                class="fas fa-arrow-right ml-1"></i></a>
+          </div>
+
+          <div class="card p-8 animate-fadeInUp h-full" style="animation-delay: 0.4s;">
+            <div class="flex items-center mb-4">
+              <i class="fas fa-memory text-4xl accent-color mr-4 icon-glow"></i>
+              <h3 class="gdt-card-title">gdt-memory <span
+                  class="text-sm font-normal text-[var(--text-secondary)]">(WIP)</span></h3>
+            </div>
+            <p class="text-[var(--text-secondary)] mb-3">
+              Because your RAM deserves a tyrant, not a suggestion.
+              Composable allocators for when <code class="inline-code">std::alloc</code> just doesn’t cut it.
+              Fine-grained control over memory — from stack frames to custom heaps — because performance is
+              non-negotiable.
+            </p>
+            <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]/80 mb-4 pl-2">
+              <li>Allocator Trait: Your rules, your memory.</li>
+              <li>Leaf Allocators: Stack, Frame, Heap, Bitmap, FreeList.</li>
+              <li>Compositors: Segregator, Fallback. Build your own hierarchy.</li>
+              <li>Alignment & Control: Perfect for SIMD.</li>
+              <li>Leak Detection & Profiling: Hunt down memory gremlins.</li>
+            </ul>
+            <p class="gdt-card-quote">"To <code class="inline-code">malloc</code> is human, to <code
+                class="inline-code">gdt-memory</code>, divine. (And much, much faster.)"</p>
+            <button class="btn btn-secondary mt-auto self-start text-sm" disabled>Coming Soon <i
+                class="fas fa-hourglass-half ml-1"></i></button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="performance" class="py-12 md:py-16 bg-darker-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp">
+          Proof is in the Pudding (Lower Latency,<br class="hidden md:inline">
+          <span class="whitespace-nowrap">Higher <abbr
+              title="An inside joke: thrash ≈ cache‐miss chaos">Thrashput™</abbr></span>)
+        </h2>
+        <p class="text-lg mb-8 leading-relaxed text-center text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.1s;">
+          Words are wind. <code class="inline-code">gdt-cpus</code> enables real, measurable wins. When your task system
+          (like <code class="inline-code">gdt-jobs</code>) or your app knows what it's running on and can tell threads
+          what to do, good things happen.
+        </p>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          <div class="card animate-fadeInUp" style="animation-delay: 0.2s;">
+            <h3 class="text-xl font-semibold mb-3 text-center accent-color">Audio Latency: SILENCE THE JITTER!</h3>
+            <div class="chart-container"><canvas id="audioLatencyChart"></canvas></div>
+            <p class="text-xs text-center mt-2 text-[var(--text-secondary)]">p99 Jitter (µs). Lower is music to your
+              ears. TC = TimeCritical.</p>
+          </div>
+          <div class="card animate-fadeInUp" style="animation-delay: 0.3s;">
+            <h3 class="text-xl font-semibold mb-3 text-center accent-color">Frame Jitter: BUTTERY SMOOTH!</h3>
+            <div class="chart-container"><canvas id="frameJitterChart"></canvas></div>
+            <p class="text-xs text-center mt-2 text-[var(--text-secondary)]">p99 Jitter (µs). Lower means less stutter.
+              H = Highest.</p>
+          </div>
+          <div class="card animate-fadeInUp" style="animation-delay: 0.4s;">
+            <h3 class="text-xl font-semibold mb-3 text-center accent-color">Parallel Tasks: NO MORE TAIL LAG!</h3>
+            <div class="chart-container"><canvas id="parallelTasksChart"></canvas></div>
+            <p class="text-xs text-center mt-2 text-[var(--text-secondary)]">p99 Latency (µs) on macOS M3 Max. P/E
+              strategy wins.</p>
+          </div>
+          <div class="card animate-fadeInUp" style="animation-delay: 0.5s;">
+            <h3 class="text-xl font-semibold mb-3 text-center accent-color">Streaming Pipeline: FASTER ASSETS!</h3>
+            <div class="chart-container"><canvas id="streamingPipelineChart"></canvas></div>
+            <p class="text-xs text-center mt-2 text-[var(--text-secondary)]">p50 Latency (µs). Prioritization matters.
+            </p>
+          </div>
+        </div>
+        <p class="mt-8 text-sm text-center text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.6s;">
+          These aren't just numbers, they're your app running better. You're welcome.
+        </p>
+      </div>
+    </section>
+
+    <section id="architecture" class="py-12 md:py-16 bg-default-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp">Under The Hood: How We Tame The Silicon
+          Beast</h2>
+        <p class="text-lg mb-8 leading-relaxed text-center text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.1s;">
+          <code class="inline-code">gdt-cpus</code> isn't just calling <code class="inline-code">num_cpus::get()</code>.
+          That's for amateurs. We dive deep into OS-specific APIs so you don't have to:
+        </p>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-center">
+          <div class="card p-4 animate-fadeInUp" style="animation-delay: 0.2s;">
+            <div class="feature-card-content">
+              <h4 class="text-xl font-semibold mb-2 accent-color">Windows</h4>
+              <p class="text-lg text-[var(--text-secondary)]"><code
+                  class="inline-code">GetLogicalProcessorInformationEx</code>, Registry, <code
+                  class="inline-code">SetThreadAffinityMask</code></p>
+            </div>
+          </div>
+          <div class="card p-4 animate-fadeInUp" style="animation-delay: 0.3s;">
+            <div class="feature-card-content">
+              <h4 class="text-xl font-semibold mb-2 accent-color">Linux</h4>
+              <p class="text-lg text-[var(--text-secondary)]"><code class="inline-code">sysfs</code>, <code
+                  class="inline-code">/proc/cpuinfo</code>, <code class="inline-code">cpuid</code>, <code
+                  class="inline-code">sched_setaffinity</code>, <code class="inline-code">setpriority</code></p>
+            </div>
+          </div>
+          <div class="card p-4 animate-fadeInUp" style="animation-delay: 0.4s;">
+            <div class="feature-card-content">
+              <h4 class="text-xl font-semibold mb-2 accent-color">macOS</h4>
+              <p class="text-lg text-[var(--text-secondary)]"><code class="inline-code">sysctl</code>, <code
+                  class="inline-code">cpuid</code> (x86), QoS, <code class="inline-code">thread_policy_set</code></p>
+            </div>
+          </div>
+        </div>
+        <p class="text-center mt-8 text-md leading-relaxed text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.5s;">
+          All this pain, abstracted away into one beautiful, cross-platform Rust API. We do the dirty work. You reap the
+          rewards.
+        </p>
+        <div class="readme-quote max-w-2xl mx-auto mt-6 animate-fadeInUp" style="animation-delay: 0.6s;">
+          "Abstraction without insight is just hiding the problem. <code class="inline-code">gdt-cpus</code> gives you
+          both."
+        </div>
+      </div>
+    </section>
+
+    <section id="hybrid-dominance" class="py-12 md:py-16 bg-darker-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp">Hybrid CPU Dominance: P-Cores & E-Cores on
+          a Leash</h2>
+        <p class="text-lg mb-8 leading-relaxed text-center text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.1s;">
+          Those P-cores and E-cores? They're not just suggestions. <code class="inline-code">gdt-cpus</code> tells you
+          exactly what you've got, so you (or your job system) can:
+        </p>
+        <div class="flex flex-col md:flex-row justify-around items-stretch space-y-6 md:space-y-0 md:space-x-6">
+          <div class="card flex-1 p-6 animate-fadeInUp" style="animation-delay: 0.2s;">
+            <div class="feature-card-content">
+              <div class="flex items-center mb-3">
+                <i class="fas fa-rocket text-3xl accent-color mr-3 icon-glow"></i>
+                <h4 class="text-xl font-semibold text-[var(--text-primary)]">P-Cores (Performance)</h4>
+              </div>
+              <p class="text-sm text-[var(--text-secondary)]">Unleash the beasts for your critical, latency-sensitive
+                work. Pin 'em if you got 'em (and if your OS isn't Apple).</p>
+            </div>
+          </div>
+          <div class="card flex-1 p-6 animate-fadeInUp" style="animation-delay: 0.3s;">
+            <div class="feature-card-content">
+              <div class="flex items-center mb-3">
+                <i class="fas fa-leaf text-3xl accent-color mr-3 icon-glow"></i>
+                <h4 class="text-xl font-semibold text-[var(--text-primary)]">E-Cores (Efficiency)</h4>
+              </div>
+              <p class="text-sm text-[var(--text-secondary)]">Perfect for background tasks, parallel number crunching
+                that can wait, or just saving your laptop's battery. Offload wisely.</p>
+            </div>
+          </div>
+        </div>
+        <p class="text-sm text-center mt-8 text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.4s;">
+          <code class="inline-code">gdt-cpus</code> gives you the intel. Using it to make your app scream (or sip power)
+          is up to you.
+        </p>
+      </div>
+    </section>
+
+    <section id="comparisons" class="py-12 md:py-16 bg-default-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp"><code class="inline-code">gdt-cpus</code>
+          vs. The "Alternatives" (Bless Their Hearts)</h2>
+        <p class="text-lg mb-8 leading-relaxed text-center text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.1s;">
+          Sure, there are other ways to poke at your CPU. If you like basic, or platform-locked, or just... less.
+        </p>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+          <div class="lg:col-span-2 card animate-fadeInUp" style="animation-delay: 0.2s;">
+            <div class="overflow-x-auto">
+              <table class="comparison-table w-full">
+                <thead>
+                  <tr>
+                    <th>Capability</th>
+                    <th class="text-center"><code class="inline-code">gdt-cpus</code> (The Pro)</th>
+                    <th class="text-center"><code class="inline-code">num_cpus</code> (The Intern)</th>
+                    <th class="text-center"><code class="inline-code">raw-cpuid</code> (The x86 Nerd)</th>
+                    <th class="text-center">OS APIs (The DIY Nightmare)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Core Counts</td>
+                    <td class="text-center text-green-500 font-bold">👑</td>
+                    <td class="text-center text-yellow-500">👍</td>
+                    <td class="text-center text-red-500">🤷</td>
+                    <td class="text-center text-yellow-500">😬</td>
+                  </tr>
+                  <tr>
+                    <td>Full Topology (Cache, Sockets)</td>
+                    <td class="text-center text-green-500 font-bold">👑</td>
+                    <td class="text-center text-red-500">❌</td>
+                    <td class="text-center text-yellow-500">🔬 (x86)</td>
+                    <td class="text-center text-yellow-500">🤯</td>
+                  </tr>
+                  <tr>
+                    <td>P/E Core Detection</td>
+                    <td class="text-center text-green-500 font-bold">👑</td>
+                    <td class="text-center text-red-500">❌</td>
+                    <td class="text-center text-red-500">❌</td>
+                    <td class="text-center text-yellow-500">🧩</td>
+                  </tr>
+                  <tr>
+                    <td>Thread Affinity</td>
+                    <td class="text-center text-green-500 font-bold">👑</td>
+                    <td class="text-center text-red-500">❌</td>
+                    <td class="text-center text-red-500">❌</td>
+                    <td class="text-center text-yellow-500">🧩</td>
+                  </tr>
+                  <tr>
+                    <td>Thread Priority</td>
+                    <td class="text-center text-green-500 font-bold">👑</td>
+                    <td class="text-center text-red-500">❌</td>
+                    <td class="text-center text-red-500">❌</td>
+                    <td class="text-center text-yellow-500">🧩</td>
+                  </tr>
+                  <tr>
+                    <td>Cross-Platform Ease</td>
+                    <td class="text-center text-green-500 font-bold">👑</td>
+                    <td class="text-center text-green-500">👍</td>
+                    <td class="text-center text-red-500">limited</td>
+                    <td class="text-center text-red-500">❌❌❌</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card animate-fadeInUp lg:mt-0" style="animation-delay: 0.3s;">
+            <h3 class="text-xl font-semibold mb-3 text-center accent-color">Who Rules the CPU?</h3>
+            <div class="chart-container h-[300px] md:h-[320px] max-h-[350px] w-full max-w-sm mx-auto">
+              <canvas id="comparisonRadarChart"></canvas>
+            </div>
+            <p class="text-xs text-center mt-2 text-[var(--text-secondary)]">Higher score is better. Max 10.</p>
+          </div>
+        </div>
+
+        <blockquote class="readme-quote max-w-2xl mx-auto mt-8 animate-fadeInUp text-center"
+          style="animation-delay: 0.4s;">
+          <p class="text-lg font-semibold">We ❤️ <code class="inline-code">num_cpus</code> – full respect!</p>
+          <p>Our brains just speak in sarcasm & memes 🤷‍♂️</p>
+          <p class="text-md text-center mt-4 italic text-[var(--text-secondary)] animate-fadeInUp"
+            style="animation-delay: 0.45s;">
+            (<code class="inline-code">num_cpus</code> paved the way for CPU introspection in Rust – <code
+              class="inline-code">gdt-cpus</code> just straps a rocket to it. 🚀)
+          </p>
+        </blockquote>
+        <p class="text-sm text-center mt-6 text-[var(--text-secondary)] animate-fadeInUp"
+          style="animation-delay: 0.5s;">
+          Choose wisely. Or just choose <code class="inline-code">gdt-cpus</code> and be done with it.
+        </p>
+      </div>
+    </section>
+
+    <section id="swot" class="py-12 md:py-16 bg-darker-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp">The SWOT Analysis (Because We're
+          "Strategic")</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="card swot-item animate-fadeInUp" style="animation-delay: 0.1s;">
+            <h3 class="text-xl font-bold accent-color mb-2">💪 Strengths (Obvious Stuff)</h3>
+            <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]">
+              <li>Deep CPU insights, cross-platform.</li>
+              <li>P/E core aware. Your hybrid CPU will love you.</li>
+              <li>Thread pinning & priority control that *works*.</li>
+              <li>Foundation for god-tier task systems (hi, <code class="inline-code">gdt-jobs</code>!).</li>
+              <li>C FFI via <code class="inline-code">gdt-cpus-sys</code>? Check. Your C++ will thank you.</li>
+            </ul>
+          </div>
+          <div class="card swot-item animate-fadeInUp" style="animation-delay: 0.2s;">
+            <h3 class="text-xl font-bold accent-color mb-2">📉 Weaknesses (If We *Must*)</h3>
+            <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]">
+              <li>Not magic. You still gotta write good code on top.</li>
+              <li>Apple Silicon affinity? Apple says "lol no". We report that accurately.</li>
+              <li>Might be overkill if all you need is <code class="inline-code">num_cpus::get()</code>. (But why
+                settle?)</li>
+            </ul>
+          </div>
+          <div class="card swot-item animate-fadeInUp" style="animation-delay: 0.3s;">
+            <h3 class="text-xl font-bold accent-color mb-2">🚀 Opportunities (World Domination Plans)</h3>
+            <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]">
+              <li>More NUMA smarts for server beasts.</li>
+              <li>Even *more* detailed cache info. Because why not.</li>
+              <li>Your favorite engine using <code class="inline-code">gdt-cpus</code> under the hood.</li>
+            </ul>
+          </div>
+          <div class="card swot-item animate-fadeInUp" style="animation-delay: 0.4s;">
+            <h3 class="text-xl font-bold accent-color mb-2">⚠️ Threats (The Competition... Kinda)</h3>
+            <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]">
+              <li>OS schedulers *might* get smarter. Someday. Maybe.</li>
+              <li>Someone writing an even *more* arrogant README. Unlikely.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="versioning" class="py-12 md:py-16 bg-default-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp">Versioning – CalVer, Deal With It
+        </h2>
+        <blockquote class="readme-quote max-w-2xl mx-auto animate-fadeInUp" style="animation-delay: 0.1s;">
+          <p class="text-lg font-semibold">Wait, CalVer for a lib? Ya Idjits or something?</p>
+          <p class="text-sm">(Bobby Singer voice, obviously.)</p>
+        </blockquote>
+        <div class="max-w-3xl mx-auto animate-fadeInUp" style="animation-delay: 0.2s;">
+          <p class="text-lg mb-6 leading-relaxed text-[var(--text-secondary)]">
+            Yep, we timestamp our releases instead of counting up semantic digits. Why? Because we're just built
+            different. And because:
+          </p>
+          <div class="card p-0 overflow-hidden animate-fadeInUp" style="animation-delay: 0.3s;">
+            <div class="overflow-x-auto">
+              <table class="comparison-table w-full">
+                <thead>
+                  <tr>
+                    <th>CalVer Perk</th>
+                    <th>Why You Care</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>Instant age check</strong></td>
+                    <td><code class="inline-code">25.5.0</code> → May 2025. No need to diff tags to see if a crate is
+                      fossilized or fresh off the compiler.</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Honesty about breakage</strong></td>
+                    <td>New month? Could be a breaking change. You’ll know from the number *and* from a
+                      <strong>Migration Guide <code class="inline-code">25.4</code> → <code
+                          class="inline-code">25.5</code></strong> in the repo. We're not shy.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><strong>Works fine with Cargo</strong></td>
+                    <td><code class="inline-code">cargo add gdt-cpus@^25.5</code> still pins the May 2025 API line; you
+                      won’t auto-upgrade to <code class="inline-code">26.1</code> unless you explicitly ask for it.
+                      Cargo gets it.</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Less bike-shedding</strong></td>
+                    <td>We’d rather spend time tuning work-steal loops and optimizing P/E core scheduling than debating
+                      whether the last commit was “minor” or “patch”. Priorities, people.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p class="text-lg mt-8 mb-4 font-semibold leading-relaxed text-[var(--text-primary)] animate-fadeInUp"
+            style="animation-delay: 0.4s;">
+            TL;DR:
+          </p>
+          <p class="text-lg mb-6 leading-relaxed text-[var(--text-secondary)]">
+            Each year/month is an API epoch. If we break you, the migration doc shows the fix;
+            if we don’t, <code class="inline-code">cargo update</code> is painless.<br>
+            <strong>And if we mess up, the date tells you exactly when to roast us in Issues. 😎</strong>
+          </p>
+
+          <p class="text-sm text-center text-[var(--text-secondary)]/80">
+            <sub>(We’re not idjits – just impatient.)</sub>
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="contributing" class="py-12 md:py-16 bg-darker-section">
+      <div class="container mx-auto px-6">
+        <h2 class="section-title text-center mb-10 md:mb-12 animate-fadeInUp">How Can I Contribute?</h2>
+        <div class="max-w-3xl mx-auto animate-fadeInUp" style="animation-delay: 0.2s;">
+          <p class="text-lg mb-6 leading-relaxed text-[var(--text-secondary)] text-center">
+            Find something that’s missing, broken, or just less performant than your standards require.
+            <br />
+            Open an issue. Bonus points if you make a PR. A 🍪 if benchmarks go <em>brrrrr</em>.
+          </p>
+          <p class="text-lg mb-6 leading-relaxed text-[var(--text-secondary)] text-center">
+            But wait, where is the <strong class="text-[var(--text-primary)]">CODE_OF_CONDUCT</strong>?
+            <br />
+            <span class="text-[var(--text-primary)] font-semibold">Code of what?</span> Quoting a famous internet meme:
+          </p>
+          <blockquote class="readme-quote max-w-lg mx-auto mt-2 mb-4 text-center">
+            “Apologies for the very personal question, but were you homeschooled by a pigeon?”
+          </blockquote>
+          <p class="text-lg mb-6 leading-relaxed text-[var(--text-secondary)] text-center">
+            We're all civilised here. Just don't be an asshole and we're good. 🤞🏻
+          </p>
+          <p class="text-md mt-8 text-[var(--text-secondary)] text-center max-w-xl mx-auto">
+            And hey, mad props to the entire Rust community. Y'all make low-level coding sexy again. This stuff is built
+            with love, for the love of the game (and performant Rust).
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer id="get-started" class="py-16 md:py-20 text-center bg-[var(--footer-bg)] text-[var(--footer-text)]">
+    <div class="container mx-auto px-6 animate-fadeInUp">
+      <h2 class="text-3xl md:text-4xl font-bold mb-4 text-[var(--wpg-orange)]">Enough Talk. Get <code
+          class="inline-code bg-[var(--footer-code-bg)] text-[var(--footer-code-text)]">gdt-cpus</code>.</h2>
+      <p class="text-lg mb-8 max-w-xl mx-auto">
+        Stop letting your OS treat your CPU like a rental. Take the wheel.
+      </p>
+      <div class="bg-[var(--footer-code-bg)] p-4 rounded-lg inline-block mb-8 shadow-md">
+        <code class="text-[var(--footer-code-text)] text-lg">cargo add gdt-cpus</code>
+      </div>
+      <p class="mt-4">
+        <a href="https://github.com/WildPixelGames/gdt-cpus" target="_blank" rel="noopener noreferrer"
+          class="btn btn-primary text-lg shadow-md">
+          <i class="fab fa-github mr-2"></i> Star Us on GitHub. It's The Law.
+        </a>
+      </p>
+      <blockquote class="readme-quote max-w-md mx-auto mt-8 text-[var(--text-secondary)] border-[var(--wpg-orange)]">
+        "My CPU used to cry itself to sleep. Then I found <code
+          class="inline-code bg-[var(--footer-code-bg)] text-[var(--footer-code-text)]">gdt-cpus</code>." – A Very Smart
+        Developer
+      </blockquote>
+      <p class="text-gray-400 text-sm mt-10 mb-2 flex items-center justify-center">
+        Made with <i class="fas fa-mug-hot text-yellow-500 mx-1.5"></i> (lots of it) and <i
+          class="fas fa-heart text-red-500 mx-1.5"></i> by Wild Pixel Games.
+      </p>
+      <p class="text-gray-500 text-xs mb-2"> Dual licensed under MIT / Apache-2.0. Pick your poison, build something
+        massive.
+      </p>
+      <p class="text-gray-500 text-xs"> &copy; <span id="yearRange"></span> Wild Pixel Games. We know CPUs.</p>
+    </div>
+  </footer>
+
+  <script>
+    let audioLatencyChartInstance, frameJitterChartInstance, parallelTasksChartInstance, streamingPipelineChartInstance, comparisonRadarChartInstance;
+
+    function getChartColors(isDarkMode) {
+      const rootStyle = getComputedStyle(document.documentElement);
+      return {
+        gridColor: rootStyle.getPropertyValue('--chart-grid-color').trim(),
+        tickColor: rootStyle.getPropertyValue('--chart-tick-color').trim(),
+        legendColor: rootStyle.getPropertyValue('--chart-legend-color').trim(),
+        barColors: [
+          rootStyle.getPropertyValue('--chart-bar-bg-1').trim(),
+          rootStyle.getPropertyValue('--chart-bar-bg-2').trim(),
+          rootStyle.getPropertyValue('--chart-bar-bg-3').trim(),
+          rootStyle.getPropertyValue('--chart-bar-bg-4').trim()
+        ],
+        borderColor1: rootStyle.getPropertyValue('--chart-border-color-1').trim(),
+        borderColor2: rootStyle.getPropertyValue('--chart-border-color-2').trim(),
+        pageBg: rootStyle.getPropertyValue('--page-bg').trim(),
+        accentPrimary: rootStyle.getPropertyValue('--accent-primary').trim(),
+        wpgOrangeDarker: rootStyle.getPropertyValue('--wpg-orange-darker-for-radar').trim(),
+        wpgCoolBlue: rootStyle.getPropertyValue('--wpg-cool-blue').trim(),
+        wpgGreenSeaRadar: rootStyle.getPropertyValue('--wpg-green-sea-for-radar').trim(), // New color for radar
+        wpgGreyRadar: rootStyle.getPropertyValue('--wpg-grey-for-radar').trim()
+      };
+    }
+
+    function wrapLabel(str, maxWidth) {
+      if (!str) return '';
+      if (str.length <= maxWidth) return str;
+      const words = str.split(' ');
+      let currentLine = '';
+      const lines = [];
+      for (const word of words) {
+        if ((currentLine + word).length > maxWidth && currentLine.length > 0) {
+          lines.push(currentLine.trim());
+          currentLine = '';
+        }
+        currentLine += word + ' ';
+      }
+      lines.push(currentLine.trim());
+      return lines;
+    }
+
+    const tooltipTitleCallback = function (tooltipItems) {
+      const item = tooltipItems[0];
+      if (!item || !item.chart || !item.chart.data || !item.chart.data.labels) return '';
+      let label = item.chart.data.labels[item.dataIndex];
+      return Array.isArray(label) ? label.join(' ') : label;
+    };
+
+    function createChartOptions(isRadar = false) {
+      const isDarkMode = document.documentElement.classList.contains('dark');
+      const colors = getChartColors(isDarkMode);
+      const options = {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: colors.legendColor, font: { size: 12, weight: '600' } } },
+          tooltip: {
+            callbacks: { title: tooltipTitleCallback },
+            bodyFont: { size: 12 }, titleFont: { size: 14, weight: 'bold' },
+            backgroundColor: isDarkMode ? 'rgba(0,0,0,0.85)' : 'rgba(41,41,41,0.85)',
+            titleColor: colors.accentPrimary,
+            bodyColor: isDarkMode ? '#E5E7EB' : '#ffffff',
+          }
+        }
+      };
+      if (isRadar) {
+        options.scales = {
+          r: {
+            angleLines: { color: colors.gridColor },
+            grid: { color: colors.gridColor },
+            pointLabels: { color: colors.tickColor, font: { size: 11, weight: '600' } },
+            ticks: { display: false, backdropColor: 'transparent', stepSize: 2 },
+            min: 0,
+            max: 10
+          }
+        };
+      } else {
+        options.scales = {
+          y: { beginAtZero: true, ticks: { color: colors.tickColor, font: { size: 10 } }, grid: { color: colors.gridColor } },
+          x: { ticks: { color: colors.tickColor, font: { size: 10, weight: '600' }, maxRotation: 0, minRotation: 0, autoSkip: true, maxTicksLimit: 4 }, grid: { display: false } }
+        };
+      }
+      return options;
+    }
+
+    function initOrUpdateChart(instance, elementId, chartType, data, optionsUpdater, isRadar = false) {
+      const canvas = document.getElementById(elementId);
+      if (!canvas) return null;
+      const chartOptions = optionsUpdater(isRadar);
+
+      const chartData = {
+        labels: data.labels.map(label => wrapLabel(label, 16)),
+        datasets: data.datasets
+      };
+
+      if (instance) {
+        instance.data = chartData;
+        instance.options = chartOptions;
+        instance.update();
+        return instance;
+      }
+      return new Chart(canvas, { type: chartType, data: chartData, options: chartOptions });
+    }
+
+
+    function initializeAllCharts() {
+      const isDarkMode = document.documentElement.classList.contains('dark');
+      const colors = getChartColors(isDarkMode);
+
+      const audioLatencyData = {
+        labels: ['macOS (Normal)', 'macOS (TC)', 'Linux i7 (Normal)', 'Linux i7 (TC)'],
+        datasets: [{
+          label: 'p99 Jitter (µs)', data: [726, 0, 948188, 0],
+          backgroundColor: [colors.barColors[0], colors.barColors[1], colors.barColors[0], colors.barColors[1]],
+          borderColor: [colors.borderColor1, colors.borderColor2, colors.borderColor1, colors.borderColor2],
+          borderWidth: 1, borderRadius: 4
+        }]
+      };
+      audioLatencyChartInstance = initOrUpdateChart(audioLatencyChartInstance, 'audioLatencyChart', 'bar', audioLatencyData, createChartOptions);
+
+      const frameJitterData = {
+        labels: ['macOS (Normal)', 'macOS (Highest)', 'Linux i7 (Normal)', 'Linux i7 (Highest)'],
+        datasets: [{
+          label: 'p99 Jitter (µs)', data: [3561, 527, 52, 5],
+          backgroundColor: [colors.barColors[2], colors.barColors[3], colors.barColors[2], colors.barColors[3]],
+          borderColor: [colors.borderColor1, colors.borderColor2, colors.borderColor1, colors.borderColor2],
+          borderWidth: 1, borderRadius: 4
+        }]
+      };
+      frameJitterChartInstance = initOrUpdateChart(frameJitterChartInstance, 'frameJitterChart', 'bar', frameJitterData, createChartOptions);
+
+      const parallelTasksData = {
+        labels: ['macOS (Normal)', 'macOS (P/E Strategy)'],
+        datasets: [{
+          label: 'p99 Task Latency (µs)', data: [1732, 997],
+          backgroundColor: [colors.barColors[0], colors.barColors[1]],
+          borderColor: [colors.borderColor1, colors.borderColor2],
+          borderWidth: 1, borderRadius: 4
+        }]
+      };
+      parallelTasksChartInstance = initOrUpdateChart(parallelTasksChartInstance, 'parallelTasksChart', 'bar', parallelTasksData, createChartOptions);
+
+      const streamingPipelineData = {
+        labels: ['macOS (Baseline)', 'macOS (Prioritized)', 'Linux i7 (Baseline)', 'Linux i7 (Prioritized)'],
+        datasets: [{
+          label: 'p50 End-to-End Latency (µs)', data: [4743, 3517, 5851, 5285],
+          backgroundColor: [colors.barColors[2], colors.barColors[3], colors.barColors[2], colors.barColors[3]],
+          borderColor: [colors.borderColor1, colors.borderColor2, colors.borderColor1, colors.borderColor2],
+          borderWidth: 1, borderRadius: 4
+        }]
+      };
+      streamingPipelineChartInstance = initOrUpdateChart(streamingPipelineChartInstance, 'streamingPipelineChart', 'bar', streamingPipelineData, createChartOptions);
+
+      const comparisonRadarData = {
+        labels: [
+          wrapLabel('Core Counts', 12),
+          wrapLabel('Full Topology', 12),
+          wrapLabel('P/E Detection', 12),
+          wrapLabel('Thread Affinity', 12),
+          wrapLabel('Thread Priority', 12),
+          wrapLabel('X-Platform Ease', 12)
+        ],
+        datasets: [
+          {
+            label: 'gdt-cpus',
+            data: [10, 9, 9, 8, 9, 6],
+            backgroundColor: 'rgba(255, 164, 3, 0.2)',
+            borderColor: colors.accentPrimary,
+            pointBackgroundColor: colors.accentPrimary,
+            pointBorderColor: '#fff',
+            pointHoverBackgroundColor: '#fff',
+            pointHoverBorderColor: colors.accentPrimary
+          },
+          {
+            label: 'num_cpus',
+            data: [7, 1, 0, 0, 0, 9],
+            backgroundColor: 'rgba(74, 144, 226, 0.2)',
+            borderColor: colors.wpgCoolBlue,
+            pointBackgroundColor: colors.wpgCoolBlue,
+            pointBorderColor: '#fff',
+            pointHoverBackgroundColor: '#fff',
+            pointHoverBorderColor: colors.wpgCoolBlue
+          },
+          {
+            label: 'raw-cpuid',
+            data: [3, 4, 0, 0, 0, 2],
+            backgroundColor: 'rgba(22, 160, 133, 0.2)', // New Green Sea color
+            borderColor: colors.wpgGreenSeaRadar,       // New Green Sea color
+            pointBackgroundColor: colors.wpgGreenSeaRadar,
+            pointBorderColor: '#fff',
+            pointHoverBackgroundColor: '#fff',
+            pointHoverBorderColor: colors.wpgGreenSeaRadar
+          },
+          {
+            label: 'OS APIs',
+            data: [8, 7, 6, 5, 5, 1],
+            backgroundColor: 'rgba(127, 140, 141, 0.2)',
+            borderColor: colors.wpgGreyRadar,
+            pointBackgroundColor: colors.wpgGreyRadar,
+            pointBorderColor: '#fff',
+            pointHoverBackgroundColor: '#fff',
+            pointHoverBorderColor: colors.wpgGreyRadar
+          }
+        ]
+      };
+      comparisonRadarChartInstance = initOrUpdateChart(comparisonRadarChartInstance, 'comparisonRadarChart', 'radar', comparisonRadarData, createChartOptions, true);
+    }
+
+    const animatedElements = document.querySelectorAll('.animate-fadeInUp, .animate-fadeInDown');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('is-visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.1 });
+
+    animatedElements.forEach(el => { observer.observe(el); });
+
+    const baseYear = 2025;
+    const currentYear = new Date().getFullYear();
+    const yearText = currentYear > baseYear ? `${baseYear}–${currentYear}` : `${baseYear}`;
+    const yearRangeElement = document.getElementById('yearRange');
+    if (yearRangeElement) { yearRangeElement.textContent = yearText; }
+
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const themeToggleButton = document.getElementById('theme-toggle-btn');
+      const themeIcon = document.getElementById('theme-icon');
+      const htmlEl = document.documentElement;
+
+      function setTheme(isDark) {
+        if (isDark) {
+          htmlEl.classList.add('dark');
+          themeIcon.textContent = '☀️';
+        } else {
+          htmlEl.classList.remove('dark');
+          themeIcon.textContent = '🌙';
+        }
+        localStorage.setItem('theme', isDark ? 'dark' : 'light');
+        initializeAllCharts();
+      }
+
+      const savedTheme = localStorage.getItem('theme');
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      let currentIsDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
+
+      setTheme(currentIsDark);
+
+      themeToggleButton.addEventListener('click', () => {
+        setTheme(!htmlEl.classList.contains('dark'));
+      });
+
+      const navLinks = document.querySelectorAll('.nav-link');
+      const sections = document.querySelectorAll('header[id="intro"], section[id]');
+      const navBar = document.getElementById('navbar');
+      const navBarHeight = navBar ? navBar.offsetHeight : 60;
+
+      function updateActiveLink() {
+        let currentSectionId = 'intro';
+        sections.forEach(section => {
+          if (section.offsetTop <= window.scrollY + navBarHeight + 20) {
+            currentSectionId = section.id;
+          }
+        });
+
+        navLinks.forEach(link => {
+          link.classList.remove('active');
+          if (link.getAttribute('href') === `#${currentSectionId}`) {
+            link.classList.add('active');
+          }
+        });
+      }
+      window.addEventListener('scroll', updateActiveLink);
+      updateActiveLink();
+    });
+
+  </script>
+</body>
+
+</html>
