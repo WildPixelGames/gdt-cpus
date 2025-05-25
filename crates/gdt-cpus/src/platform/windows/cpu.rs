@@ -181,7 +181,7 @@ pub fn detect_cpu_info() -> Result<CpuInfo> {
         match info_ex.Relationship {
             RelationProcessorCore => {
                 let proc_core = unsafe { &info_ex.Anonymous.Processor };
-                let core_type = if proc_core.EfficiencyClass != 0 {
+                let core_type = if proc_core.EfficiencyClass == 0 {
                     CoreType::Efficiency
                 } else {
                     CoreType::Performance
