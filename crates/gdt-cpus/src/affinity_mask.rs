@@ -64,4 +64,68 @@ impl AffinityMask {
     pub fn is_empty(&self) -> bool {
         self.bits.iter().all(|&w| w == 0)
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.bits.iter().enumerate().flat_map(|(word_idx, &word)| {
+            (0..64).filter_map(move |bit_idx| {
+                if (word & (1u64 << bit_idx)) != 0 {
+                    Some(word_idx * 64 + bit_idx)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    pub fn as_raw_u64(&self) -> u64 {
+        self.bits.first().copied().unwrap_or(0)
+    }
+
+    pub fn as_raw_bits(&self) -> &[u64] {
+        &self.bits
+    }
+}
+
+impl std::fmt::Debug for AffinityMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cores: Vec<usize> = self.iter().collect();
+
+        f.debug_struct("AffinityMask")
+            .field("cores", &cores)
+            .field("count", &cores.len())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for AffinityMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cores: Vec<usize> = self.iter().collect();
+
+        if cores.is_empty() {
+            write!(f, "AffinityMask(empty)")
+        } else {
+            write!(f, "AffinityMask({:?})", cores)
+        }
+    }
+}
+
+impl FromIterator<usize> for AffinityMask {
+    fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
+        let mut mask = AffinityMask::empty();
+
+        for id in iter {
+            mask.add(id);
+        }
+
+        mask
+    }
+}
+
+impl IntoIterator for &AffinityMask {
+    type Item = usize;
+    type IntoIter = std::vec::IntoIter<usize>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter().collect::<Vec<_>>().into_iter()
+    }
 }
