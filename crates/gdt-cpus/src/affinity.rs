@@ -75,13 +75,11 @@ pub fn pin_thread_to_core(logical_core_id: usize) -> Result<()> {
     {
         crate::platform::linux::affinity::pin_thread_to_core(logical_core_id)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        crate::platform::macos::affinity::pin_thread_to_core(logical_core_id)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-    {
-        Err(Error::Unsupported(
+        let _ = logical_core_id; // suppress unused variable warning
+
+        Err(crate::Error::Unsupported(
             "Thread pinning is not supported on this platform.".to_string(),
         ))
     }
