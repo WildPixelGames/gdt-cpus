@@ -626,7 +626,7 @@ extern "C" fn gdt_cpus_thread_priority_description(
 /// # Arguments
 ///
 /// * `out_info`: A mutable pointer to a `GdtCpusCpuInfo` struct where the CPU information will be written.
-///               The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -694,7 +694,7 @@ extern "C" fn gdt_cpus_get_vendor(vendor: *mut GdtCpusVendor) -> i32 {
 /// # Arguments
 ///
 /// * `out_features`: A mutable pointer to a `u32` where the CPU feature flags will be written.
-///                   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -724,7 +724,7 @@ extern "C" fn gdt_cpus_get_features(out_features: *mut u32) -> i32 {
 /// # Arguments
 ///
 /// * `out_num_physical_cores`: A mutable pointer to a `u64` where the total number of physical CPU cores will be written.
-///                               The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -754,7 +754,7 @@ extern "C" fn gdt_cpus_num_physical_cores(out_num_physical_cores: *mut u64) -> i
 /// # Arguments
 ///
 /// * `out_num_logical_cores`: A mutable pointer to a `u64` where the total number of logical CPUs will be written.
-///                            The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -785,7 +785,7 @@ extern "C" fn gdt_cpus_num_logical_cores(out_num_logical_cores: *mut u64) -> i32
 /// # Arguments
 ///
 /// * `out_num_logical_cpus_per_core`: A mutable pointer to a `u64` where the number of logical CPUs per core will be written.
-///                                    The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -819,7 +819,7 @@ extern "C" fn gdt_cpus_num_logical_cpus_per_core(out_num_logical_cpus_per_core: 
 /// # Arguments
 ///
 /// * `out_num_performance_cores`: A mutable pointer to a `u64` where the total number of performance cores will be written.
-///                                  The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -851,7 +851,7 @@ extern "C" fn gdt_cpus_num_performance_cores(out_num_performance_cores: *mut u64
 /// # Arguments
 ///
 /// * `out_num_efficiency_cores`: A mutable pointer to a `u64` where the total number of efficiency cores will be written.
-///                                 The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -882,8 +882,8 @@ extern "C" fn gdt_cpus_num_efficiency_cores(out_num_efficiency_cores: *mut u64) 
 /// # Arguments
 ///
 /// * `out_is_hybrid`: A mutable pointer to a `bool` where the result of the hybrid check will be written.
-///                    `true` if the CPU is hybrid, `false` otherwise.
-///                    The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   `true` if the CPU is hybrid, `false` otherwise.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -914,7 +914,7 @@ extern "C" fn gdt_cpus_is_hybrid(out_is_hybrid: *mut bool) -> i32 {
 /// # Arguments
 ///
 /// * `out_num_sockets`: A mutable pointer to a `u64` where the total number of CPU sockets will be written.
-///                      The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -946,7 +946,7 @@ extern "C" fn gdt_cpus_num_sockets(out_num_sockets: *mut u64) -> i32 {
 ///
 /// * `socket_index`: The 0-based index of the CPU socket to query.
 /// * `out_socket_info`: A mutable pointer to a `GdtCpusSocketInfo` struct where the socket information will be written.
-///                      The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -987,7 +987,7 @@ extern "C" fn gdt_cpus_get_socket_info(
 ///
 /// * `socket_index`: The 0-based index of the CPU socket to query.
 /// * `out_socket_id`: A mutable pointer to a `u64` where the socket ID will be written.
-///                    The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1025,8 +1025,8 @@ extern "C" fn gdt_cpus_get_socket_id_for_socket(socket_index: u64, out_socket_id
 ///
 /// * `socket_index`: The 0-based index of the CPU socket to query.
 /// * `out_has_l3_cache_info`: A mutable pointer to a `bool` where the result will be written.
-///                            `true` if L3 cache information is available for the socket, `false` otherwise.
-///                            The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   `true` if L3 cache information is available for the socket, `false` otherwise.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1068,7 +1068,7 @@ extern "C" fn gdt_cpus_has_l3_cache_info(
 ///
 /// * `socket_index`: The 0-based index of the CPU socket to query.
 /// * `out_cache_info`: A mutable pointer to a `GdtCpusCacheInfo` struct where the L3 cache information will be written.
-///                     The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1114,7 +1114,7 @@ extern "C" fn gdt_cpus_get_l3_cache_info(
 ///
 /// * `socket_index`: The 0-based index of the CPU socket to query.
 /// * `out_num_cores`: A mutable pointer to a `u64` where the number of cores will be written.
-///                    The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1154,7 +1154,7 @@ extern "C" fn gdt_cpus_num_cores(socket_index: u64, out_num_cores: *mut u64) -> 
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_core_info`: A mutable pointer to a `GdtCpusCoreInfo` struct where the core information will be written.
-///                    The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1202,7 +1202,7 @@ extern "C" fn gdt_cpus_get_core_info(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_core_id`: A mutable pointer to a `u64` where the core ID will be written.
-///                  The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1251,7 +1251,7 @@ extern "C" fn gdt_cpus_get_core_id(
 /// * `socket_index`: The 0-based index of the CPU socket where the core is assumed to be located.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_socket_id`: A mutable pointer to a `u64` where the parent socket ID will be written.
-///                    The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1300,7 +1300,7 @@ extern "C" fn gdt_cpus_get_socket_id_for_core(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_core_type`: A mutable pointer to a `GdtCpusCoreType` enum where the core type will be written.
-///                    The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1350,8 +1350,8 @@ extern "C" fn gdt_cpus_get_core_type(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_has_l1i_cache_info`: A mutable pointer to a `bool` where the result will be written.
-///                             `true` if L1i cache information is available for the core, `false` otherwise.
-///                             The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   `true` if L1i cache information is available for the core, `false` otherwise.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1400,7 +1400,7 @@ extern "C" fn gdt_cpus_has_l1i_cache_info(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_cache_info`: A mutable pointer to a `GdtCpusCacheInfo` struct where the L1i cache information will be written.
-///                     The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1454,8 +1454,8 @@ extern "C" fn gdt_cpus_get_l1i_cache_info(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_has_l1d_cache_info`: A mutable pointer to a `bool` where the result will be written.
-///                             `true` if L1d cache information is available for the core, `false` otherwise.
-///                             The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   `true` if L1d cache information is available for the core, `false` otherwise.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1504,7 +1504,7 @@ extern "C" fn gdt_cpus_has_l1d_cache_info(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_cache_info`: A mutable pointer to a `GdtCpusCacheInfo` struct where the L1d cache information will be written.
-///                     The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1558,8 +1558,8 @@ extern "C" fn gdt_cpus_get_l1d_cache_info(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_has_l2_cache_info`: A mutable pointer to a `bool` where the result will be written.
-///                              `true` if L2 cache information is available for the core, `false` otherwise.
-///                              The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   `true` if L2 cache information is available for the core, `false` otherwise.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1608,7 +1608,7 @@ extern "C" fn gdt_cpus_has_l2_cache_info(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_cache_info`: A mutable pointer to a `GdtCpusCacheInfo` struct where the L2 cache information will be written.
-///                     The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1662,7 +1662,7 @@ extern "C" fn gdt_cpus_get_l2_cache_info(
 /// * `socket_index`: The 0-based index of the CPU socket.
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `out_num_logical_ids`: A mutable pointer to a `u64` where the number of logical processor IDs will be written.
-///                            The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
@@ -1712,7 +1712,7 @@ extern "C" fn gdt_cpus_num_logical_processor_ids(
 /// * `core_index`: The 0-based index of the core within the specified socket.
 /// * `logical_processor_index`: The 0-based index of the logical processor within the specified core.
 /// * `out_logical_id`: A mutable pointer to a `u64` where the logical processor ID will be written.
-///                       The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
+///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
 ///
 /// # Returns
 ///
