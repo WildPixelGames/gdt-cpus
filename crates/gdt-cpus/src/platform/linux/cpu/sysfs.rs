@@ -9,7 +9,6 @@
 //! and `core_type` are read to build a comprehensive map of the CPU topology.
 
 use std::{
-
     collections::{HashMap, HashSet},
     path::Path,
 };
