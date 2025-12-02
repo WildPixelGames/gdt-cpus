@@ -13,7 +13,7 @@
 //! It also provides a way to retrieve a default set of scheduling policies via
 //! `get_scheduling_policies`.
 
-use crate::{SchedulingPolicy, ThreadPriority, error::Result};
+use crate::{AffinityMask, SchedulingPolicy, ThreadPriority, error::Result};
 
 // This static variable is internal and does not require public Rustdoc.
 // It's used by `get_scheduling_policies` to cache scheduling policy mappings if ever set.
@@ -66,21 +66,25 @@ static SCHEDULING_POLICIES_MAPPINGS: std::sync::OnceLock<[SchedulingPolicy; 7]> 
 /// }
 /// ```
 pub fn pin_thread_to_core(logical_core_id: usize) -> Result<()> {
+    set_thread_affinity(&AffinityMask::single(logical_core_id))
+}
+
+pub fn set_thread_affinity(mask: &AffinityMask) -> Result<()> {
     // Platform-specific implementation
     #[cfg(target_os = "windows")]
     {
-        crate::platform::windows::affinity::pin_thread_to_core(logical_core_id)
+        crate::platform::windows::affinity::set_thread_affinity(mask)
     }
     #[cfg(target_os = "linux")]
     {
-        crate::platform::linux::affinity::pin_thread_to_core(logical_core_id)
+        crate::platform::linux::affinity::set_thread_affinity(mask)
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        let _ = logical_core_id; // suppress unused variable warning
+        let _ = mask; // suppress unused variable warning
 
         Err(crate::Error::Unsupported(
-            "Thread pinning is not supported on this platform.".to_string(),
+            "Thread affinity is not supported on this platform.".to_string(),
         ))
     }
 }

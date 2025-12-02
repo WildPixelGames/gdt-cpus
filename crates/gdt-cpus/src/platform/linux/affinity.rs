@@ -53,63 +53,69 @@ use crate::{
 /// `libc::CPU_ZERO`, and `libc::CPU_SET`. These are standard Linux system calls
 /// and are safe when provided with valid arguments (a valid `cpu_set_t` and a TID of 0
 /// for the current thread).
-pub fn pin_thread_to_core(logical_core_id: usize) -> Result<()> {
+pub(crate) fn set_thread_affinity(mask: &AffinityMask) -> Result<()> {
+    if mask.is_empty() {
+        error!("Cannot set thread affinity with an empty mask.");
+        return Err(Error::Affinity(
+            "Cannot set thread affinity with an empty mask".to_string(),
+        ));
+    }
+
     debug!(
-        "Attempting to pin thread to logical_core_id: {} on Linux.",
-        logical_core_id
+        "Attempting to set thread affinity on Linux with mask: {:?}",
+        mask
     );
 
     let cpu_info = crate::cpu_info()?;
-
-    let logical_cores = cpu_info.num_logical_cores();
-    if logical_core_id >= logical_cores {
-        error!(
-            "logical_core_id {} is out of bounds of active logical cores {}.",
-            logical_core_id, logical_cores
-        );
-        return Err(Error::InvalidCoreId(logical_core_id));
-    }
-
     let logical_processor_ids = cpu_info.logical_processor_ids();
-
-    debug!(
-        "Mapping logical_core_id {} to logical processor IDs: {:?}",
-        logical_core_id, logical_processor_ids
-    );
-
-    let mapped_core_id = logical_processor_ids
-        .get(logical_core_id)
-        .cloned()
-        .ok_or_else(|| {
-            error!(
-                "logical_core_id {} is out of bounds of logical_processor_ids",
-                logical_core_id
-            );
-            Error::InvalidCoreId(logical_core_id)
-        })?;
-
-    debug!(
-        "Mapped logical_core_id {} to logical processor ID: {}.",
-        logical_core_id, mapped_core_id
-    );
-
     let max_cpus = libc::CPU_SETSIZE as usize;
-    if mapped_core_id >= max_cpus {
-        error!(
-            "mapped_core_id {} is out of bounds for CPU_SETSIZE.",
-            mapped_core_id
-        );
-        return Err(Error::InvalidCoreId(mapped_core_id));
-    }
 
     // SAFETY: Zero-initializes the cpu_set_t structure.
     // cpu_set_t is POD without non-zeroable invariants; zeroing yields a valid struct.
     let mut cpuset: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    // SAFETY: CPU_ZERO and CPU_SET are safe to call with a valid cpu_set_t pointer.
+    // SAFETY: CPU_ZERO is safe to call with a valid cpu_set_t pointer.
     unsafe {
         libc::CPU_ZERO(&mut cpuset);
-        libc::CPU_SET(mapped_core_id, &mut cpuset);
     }
+
+    // Set all cores in the mask
+    let mut cores_set = 0;
+    for core_idx in mask.iter() {
+        if let Some(&os_core_id) = logical_processor_ids.get(core_idx) {
+            if os_core_id < max_cpus {
+                // SAFETY: CPU_SET is safe with a valid cpu_set_t pointer and valid CPU index.
+                unsafe {
+                    libc::CPU_SET(os_core_id, &mut cpuset);
+                }
+
+                cores_set += 1;
+
+                debug!(
+                    "Added OS core {} (index {}) to cpuset.",
+                    os_core_id, core_idx
+                );
+            } else {
+                warn!(
+                    "OS core ID {} exceeds CPU_SETSIZE {}, skipping.",
+                    os_core_id, max_cpus
+                );
+            }
+        } else {
+            warn!(
+                "Core index {} not found in logical_processor_ids, skipping.",
+                core_idx
+            );
+        }
+    }
+
+    if cores_set == 0 {
+        error!("No valid cores could be added to the affinity mask.");
+        return Err(Error::Affinity(
+            "No valid cores could be added to the affinity mask".to_string(),
+        ));
+    }
+
+    debug!("Setting affinity to {} cores.", cores_set);
 
     // SAFETY: sched_setaffinity is a system call that sets the CPU affinity for the calling thread.
     // pid == 0 means the calling thread, and the size of the cpu_set_t is passed.
@@ -118,19 +124,13 @@ pub fn pin_thread_to_core(logical_core_id: usize) -> Result<()> {
 
     if res == -1 {
         let err = std::io::Error::last_os_error();
-        error!(
-            "sched_setaffinity failed for mapped_core_id {}: {}",
-            mapped_core_id, err
-        );
+        error!("sched_setaffinity failed for mask: {}", err);
         Err(Error::Affinity(format!(
             "sched_setaffinity failed: {}",
             err
         )))
     } else {
-        debug!(
-            "Successfully pinned thread to mapped_core_id: {}.",
-            mapped_core_id
-        );
+        debug!("Successfully set thread affinity to {} cores.", cores_set);
         Ok(())
     }
 }
@@ -292,7 +292,7 @@ fn set_thread_nice_value(nice_value: c_int) -> Result<()> {
 /// the internal (also `unsafe`) `set_thread_nice_value()`. These are standard Linux
 /// system calls. `sched_setscheduler` is safe if the TID (0 for current thread),
 /// policy, and `sched_param` are valid. Permissions are the primary concern, handled by fallbacks.
-pub fn set_thread_priority(priority: ThreadPriority) -> Result<()> {
+pub(crate) fn set_thread_priority(priority: ThreadPriority) -> Result<()> {
     // 1. Get scheduling policy
     let priority_idx = priority as usize;
     let sched_policy = get_scheduling_policies().get(priority_idx).ok_or_else(|| {

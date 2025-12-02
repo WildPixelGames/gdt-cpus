@@ -5,12 +5,14 @@
 //! `SetThreadAffinityMask` and `SetThreadPriority`.
 
 use log::{debug, error};
-use windows::Win32::Foundation::{GetLastError, HANDLE};
-use windows::Win32::System::Threading::{
-    GetCurrentThread, SetThreadAffinityMask, SetThreadPriority, THREAD_PRIORITY,
+use windows::Win32::{
+    Foundation::{GetLastError, HANDLE},
+    System::Threading::{
+        GetCurrentThread, SetThreadAffinityMask, SetThreadPriority, THREAD_PRIORITY,
+    },
 };
 
-use crate::{Error, Result, ThreadPriority, get_scheduling_policies};
+use crate::{AffinityMask, Error, Result, ThreadPriority, get_scheduling_policies};
 
 /// Pins the current thread to a specific logical core ID on Windows.
 ///
@@ -34,30 +36,37 @@ use crate::{Error, Result, ThreadPriority, get_scheduling_policies};
 /// For systems with more than 64 logical processors, `SetThreadAffinityMask` is
 /// insufficient. Such systems require the use of `SetThreadGroupAffinity` and related
 /// processor group APIs, which are not currently implemented by this function.
-pub(crate) fn pin_thread_to_core(logical_core_id: usize) -> Result<()> {
-    debug!(
-        "Attempting to pin thread to logical_core_id: {} on Windows.",
-        logical_core_id
-    );
-
-    if logical_core_id >= (std::mem::size_of::<usize>() * 8) {
-        error!(
-            "Logical core ID {} is too large for SetThreadAffinityMask (max {}). Systems with >64 LPs require SetThreadGroupAffinity.",
-            logical_core_id,
-            (std::mem::size_of::<usize>() * 8) - 1
-        );
-        return Err(Error::InvalidCoreId(logical_core_id));
+pub(crate) fn set_thread_affinity(mask: &AffinityMask) -> Result<()> {
+    if mask.is_empty() {
+        error!("Cannot set thread affinity with an empty mask.");
+        return Err(Error::Affinity(
+            "Cannot set thread affinity with an empty mask".to_string(),
+        ));
     }
 
-    let affinity_mask: usize = 1usize << logical_core_id;
+    debug!(
+        "Attempting to set thread affinity on Windows with mask: {:?}",
+        mask
+    );
+
+    let affinity_mask: usize = mask.as_raw_u64() as usize;
+
+    if affinity_mask == 0 {
+        error!("Affinity mask is computed as zero for mask {:?}", mask);
+        return Err(Error::Affinity(format!(
+            "Affinity mask is computed as zero for mask {:?}",
+            mask
+        )));
+    }
+
     let thread_handle: HANDLE = unsafe { GetCurrentThread() };
     let old_mask = unsafe { SetThreadAffinityMask(thread_handle, affinity_mask) };
 
     if old_mask == 0 {
         let error_code = unsafe { GetLastError() };
         error!(
-            "SetThreadAffinityMask failed for logical_core_id {}. Error: {:?}",
-            logical_core_id, error_code
+            "SetThreadAffinityMask failed for mask {}. Error: {:?}",
+            mask, error_code
         );
         Err(Error::Affinity(format!(
             "SetThreadAffinityMask failed with error code: {:?}",
@@ -65,8 +74,8 @@ pub(crate) fn pin_thread_to_core(logical_core_id: usize) -> Result<()> {
         )))
     } else {
         debug!(
-            "Successfully pinned thread to logical_core_id: {} (old mask: {:#x}).",
-            logical_core_id, old_mask
+            "Successfully set thread affinity to {:#x} (old mask: {:#x}).",
+            affinity_mask, old_mask
         );
         Ok(())
     }
