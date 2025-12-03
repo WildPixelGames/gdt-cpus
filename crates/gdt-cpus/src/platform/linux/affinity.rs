@@ -1,13 +1,12 @@
 //! Linux-specific thread affinity and priority management.
 //!
-//! This module provides functions to control thread affinity (pinning to a core)
-//! and thread priority (via `nice` values or real-time scheduling policies)
-//! on Linux systems.
+//! This module provides functions to control thread affinity and thread priority
+//! (via `nice` values or real-time scheduling policies) on Linux systems.
 //!
 //! **Important Notes for Linux:**
-//! - **Thread Affinity (Pinning):** Uses `sched_setaffinity` to pin the current thread
-//!   to a specific logical core. The provided `logical_core_id` is an index into the
-//!   list of available logical processor IDs reported by the system.
+//! - **Thread Affinity:** Uses `sched_setaffinity` to restrict the current thread
+//!   to a set of logical cores specified by an [`AffinityMask`]. The mask indices
+//!   are mapped to OS-level logical processor IDs.
 //! - **Thread Priority:**
 //!   - For standard priorities, this module adjusts the `nice` value of the thread using
 //!     `setpriority`. Lower `nice` values (e.g., -20) mean higher priority.
@@ -18,33 +17,32 @@
 //!     mechanisms to attempt setting a default `nice` value (0) if permission is denied
 //!     for a higher priority.
 //!
-//! The main functions provided are [`pin_thread_to_core`] and [`set_thread_priority`].
+//! The main functions provided are [`set_thread_affinity`] and [`set_thread_priority`].
 
 use libc::{SYS_gettid, c_int, syscall};
 use log::{debug, error, warn};
 
 use crate::{
-    Error, Result, SchedulingPolicy, ThreadPriority, get_scheduling_policies,
+    AffinityMask, Error, Result, SchedulingPolicy, ThreadPriority, get_scheduling_policies,
     platform::linux::scheduling_policy::NICE_NORMAL,
 };
 
-/// Pins the current thread to a specific logical core on Linux.
+/// Sets the CPU affinity of the current thread on Linux.
 ///
-/// The `logical_core_id` is an index that maps to an OS-level logical processor ID.
-/// This function first retrieves the system's CPU information to get the list of
-/// logical processor IDs and then uses `libc::sched_setaffinity` to pin the thread
-/// to the core corresponding to the `logical_processor_ids[logical_core_id]`.
+/// This function restricts the current thread to execute only on the logical
+/// cores specified in the [`AffinityMask`]. It uses `libc::sched_setaffinity`
+/// to apply the affinity mask.
 ///
 /// # Arguments
 ///
-/// * `logical_core_id`: An index representing the desired logical core. This value must be
-///   less than the total number of logical cores available on the system.
+/// * `mask`: An [`AffinityMask`] specifying which logical cores the thread may run on.
+///   Core indices in the mask are mapped to OS-level logical processor IDs.
 ///
 /// # Returns
 ///
-/// - `Ok(())` if the thread was successfully pinned.
-/// - `Error::InvalidCoreId` if `logical_core_id` is out of bounds or the mapped ID is invalid.
-/// - `Error::Affinity` if `sched_setaffinity` fails.
+/// - `Ok(())` if the affinity was successfully set.
+/// - `Error::Affinity` if the mask is empty, no valid cores could be added, or
+///   `sched_setaffinity` fails.
 /// - Errors from `crate::cpu_info()` if CPU information cannot be retrieved.
 ///
 /// # Safety

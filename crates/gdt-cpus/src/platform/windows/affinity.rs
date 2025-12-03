@@ -14,28 +14,27 @@ use windows::Win32::{
 
 use crate::{AffinityMask, Error, Result, ThreadPriority, get_scheduling_policies};
 
-/// Pins the current thread to a specific logical core ID on Windows.
+/// Sets the CPU affinity of the current thread on Windows.
 ///
 /// This function uses `SetThreadAffinityMask` to restrict the execution of the
-/// current thread to the specified logical core.
+/// current thread to the logical cores specified in the [`AffinityMask`].
 ///
 /// # Arguments
 ///
-/// * `logical_core_id`: The zero-based ID of the logical core to pin the thread to.
-///   This ID must be less than the number of bits in `usize` (e.g., < 64 on a
-///   64-bit system).
+/// * `mask`: An [`AffinityMask`] specifying which logical cores the thread may run on.
 ///
 /// # Returns
 ///
 /// A `Result<()>` which is `Ok(())` on success, or an `Error` if:
-/// - `logical_core_id` is too large (see `Error::InvalidCoreId`).
+/// - The mask is empty or computes to zero (see `Error::Affinity`).
 /// - `SetThreadAffinityMask` fails (see `Error::Affinity`).
 ///
 /// # Remarks
 ///
-/// For systems with more than 64 logical processors, `SetThreadAffinityMask` is
-/// insufficient. Such systems require the use of `SetThreadGroupAffinity` and related
-/// processor group APIs, which are not currently implemented by this function.
+/// Currently only the first 64 cores (bits 0-63) of the mask are used due to
+/// `SetThreadAffinityMask` limitations. For systems with more than 64 logical
+/// processors, `SetThreadGroupAffinity` and related processor group APIs would
+/// be required, which are not currently implemented.
 pub(crate) fn set_thread_affinity(mask: &AffinityMask) -> Result<()> {
     if mask.is_empty() {
         error!("Cannot set thread affinity with an empty mask.");
