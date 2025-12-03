@@ -154,3 +154,84 @@ impl IntoIterator for &AffinityMask {
         self.iter().collect::<Vec<_>>().into_iter()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_mask() {
+        let mask = AffinityMask::empty();
+        assert!(mask.is_empty());
+        assert_eq!(mask.count(), 0);
+        assert!(!mask.contains(0));
+    }
+
+    #[test]
+    fn test_single_core() {
+        let mask = AffinityMask::single(5);
+        assert!(!mask.is_empty());
+        assert_eq!(mask.count(), 1);
+        assert!(mask.contains(5));
+        assert!(!mask.contains(4));
+    }
+
+    #[test]
+    fn test_from_cores() {
+        let mask = AffinityMask::from_cores(&[0, 2, 4, 6]);
+        assert_eq!(mask.count(), 4);
+        assert!(mask.contains(0));
+        assert!(!mask.contains(1));
+        assert!(mask.contains(2));
+    }
+
+    #[test]
+    fn test_add_remove() {
+        let mut mask = AffinityMask::empty();
+        mask.add(0);
+        mask.add(1);
+        assert_eq!(mask.count(), 2);
+
+        mask.remove(0);
+        assert_eq!(mask.count(), 1);
+        assert!(!mask.contains(0));
+        assert!(mask.contains(1));
+    }
+
+    #[test]
+    fn test_high_core_ids() {
+        let mut mask = AffinityMask::empty();
+        mask.add(0);
+        mask.add(64);
+        mask.add(128);
+
+        assert_eq!(mask.count(), 3);
+        assert!(mask.contains(0));
+        assert!(mask.contains(64));
+        assert!(mask.contains(128));
+        assert!(!mask.contains(63));
+        assert!(!mask.contains(65));
+    }
+
+    #[test]
+    fn test_iter() {
+        let mask = AffinityMask::from_cores(&[1, 3, 5, 64, 65]);
+        let cores: Vec<usize> = mask.iter().collect();
+        assert_eq!(cores, vec![1, 3, 5, 64, 65]);
+    }
+
+    #[test]
+    fn test_as_raw_u64() {
+        let mask = AffinityMask::from_cores(&[0, 1, 63]);
+        assert_eq!(mask.as_raw_u64(), 0x8000_0000_0000_0003);
+    }
+
+    #[test]
+    fn test_from_iterator() {
+        let mask: AffinityMask = vec![0, 2, 4].into_iter().collect();
+        assert_eq!(mask.count(), 3);
+        assert!(mask.contains(0));
+        assert!(mask.contains(2));
+        assert!(mask.contains(4));
+    }
+}
