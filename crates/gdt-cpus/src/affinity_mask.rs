@@ -77,6 +77,31 @@ impl AffinityMask {
         })
     }
 
+    pub fn union(&self, other: &AffinityMask) -> AffinityMask {
+        let max_len = self.bits.len().max(other.bits.len());
+        let mut bits = vec![0u64; max_len];
+
+        for (i, &word) in self.bits.iter().enumerate() {
+            bits[i] |= word;
+        }
+        for (i, &word) in other.bits.iter().enumerate() {
+            bits[i] |= word;
+        }
+
+        AffinityMask { bits }
+    }
+
+    pub fn intersection(&self, other: &AffinityMask) -> AffinityMask {
+        let min_len = self.bits.len().min(other.bits.len());
+        let bits: Vec<u64> = self.bits[..min_len]
+            .iter()
+            .zip(other.bits[..min_len].iter())
+            .map(|(&a, &b)| a & b)
+            .collect();
+
+        AffinityMask { bits }
+    }
+
     pub fn as_raw_u64(&self) -> u64 {
         self.bits.first().copied().unwrap_or(0)
     }
