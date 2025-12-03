@@ -65,6 +65,7 @@
 
 // Modules
 mod affinity;
+mod affinity_mask;
 mod cpu;
 mod error;
 mod platform;
@@ -72,6 +73,7 @@ mod priority;
 
 // Re-exports - Public API
 pub use affinity::*;
+pub use affinity_mask::AffinityMask;
 pub use cpu::{
     CacheInfo, CacheLevel, CacheType, CoreInfo, CoreType, CpuFeatures, CpuInfo, SocketInfo, Vendor,
 };

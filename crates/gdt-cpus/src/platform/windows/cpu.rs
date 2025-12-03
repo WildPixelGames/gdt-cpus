@@ -120,8 +120,8 @@ pub fn detect_cpu_info() -> Result<CpuInfo> {
             )));
         }
         debug!(
-            "GetLogicalProcessorInformationEx (size query) returned error (expected for size retrieval), buffer_size set to: {}",
-            buffer_size
+            "GetLogicalProcessorInformationEx (size query) returned error (expected for size retrieval), buffer_size set to: {}. Error: {:?}",
+            buffer_size, err_code
         );
     }
 
@@ -173,6 +173,8 @@ pub fn detect_cpu_info() -> Result<CpuInfo> {
     let mut current_ptr = buffer.as_ptr();
     let end_ptr = unsafe { buffer.as_ptr().add(buffer_size as usize) };
 
+    let mut p_cores_count = 0;
+
     debug!("Starting GetLogicalProcessorInformationEx pass 1: Identify LPs, P/E, Caches");
     while current_ptr < end_ptr {
         let info_ex = unsafe { &*(current_ptr as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) };
@@ -192,6 +194,9 @@ pub fn detect_cpu_info() -> Result<CpuInfo> {
                     let mask = group_affinity.Mask;
                     for bit_idx in 0..std::mem::size_of::<usize>() * 8 {
                         if (mask >> bit_idx) & 1 != 0 {
+                            if core_type == CoreType::Performance {
+                                p_cores_count += 1;
+                            }
                             let logical_processor_id = (group_idx * 64) + bit_idx;
                             logical_processor_map.insert(logical_processor_id, core_type);
                         }
@@ -284,10 +289,13 @@ pub fn detect_cpu_info() -> Result<CpuInfo> {
             let current_global_phys_core_id = global_phys_core_id_assigner;
             global_phys_core_id_assigner += 1;
 
-            let core_type_from_map = logical_processor_map
+            let mut core_type_from_map = logical_processor_map
                 .get(&first_lp_in_this_core_relation)
                 .cloned()
                 .unwrap_or(CoreType::Performance);
+            if p_cores_count == 0 {
+                core_type_from_map = CoreType::Performance;
+            }
             if core_type_from_map == CoreType::Performance {
                 total_performance_cores += 1;
             } else {

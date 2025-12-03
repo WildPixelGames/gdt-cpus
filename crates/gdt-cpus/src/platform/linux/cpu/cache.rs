@@ -16,9 +16,7 @@ use std::{
 
 use log::{debug, warn};
 
-use crate::{
-    CacheInfo, CacheLevel, CacheType, CoreType, platform::linux::utils::read_sysfs_value,
-};
+use crate::{CacheInfo, CacheLevel, CacheType, CoreType, platform::linux::utils::read_sysfs_value};
 
 use super::CoreToCacheMap;
 

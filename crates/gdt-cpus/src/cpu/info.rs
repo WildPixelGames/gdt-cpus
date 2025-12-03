@@ -1,5 +1,4 @@
-use super::{CpuFeatures, SocketInfo, Vendor};
-use crate::Result;
+use crate::{AffinityMask, CoreType, CpuFeatures, Result, SocketInfo, Vendor};
 
 /// Provides a comprehensive overview of the system's CPU capabilities.
 ///
@@ -234,5 +233,36 @@ impl CpuInfo {
                     .flat_map(|core| core.logical_processor_ids.clone())
             })
             .collect()
+    }
+
+    pub fn all_cores_mask(&self) -> AffinityMask {
+        AffinityMask::from_cores(&self.logical_processor_ids())
+    }
+
+    pub fn performance_core_mask(&self) -> AffinityMask {
+        self.cores_by_type_mask(CoreType::Performance)
+    }
+
+    pub fn efficiency_core_mask(&self) -> AffinityMask {
+        self.cores_by_type_mask(CoreType::Efficiency)
+    }
+
+    pub fn cores_by_type_mask(&self, core_type: CoreType) -> AffinityMask {
+        let core_ids: Vec<usize> = self
+            .sockets
+            .iter()
+            .flat_map(|socket| {
+                socket.cores.iter().filter_map(|core| {
+                    if core.core_type == core_type {
+                        Some(core.logical_processor_ids.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten()
+            .collect();
+
+        AffinityMask::from_cores(&core_ids)
     }
 }
