@@ -77,43 +77,33 @@ pub(crate) fn set_thread_affinity(mask: &AffinityMask) -> Result<()> {
     }
 
     // Set all cores in the mask
-    let mut cores_set = 0;
     for core_idx in mask.iter() {
-        if let Some(&os_core_id) = logical_processor_ids.get(core_idx) {
-            if os_core_id < max_cpus {
-                // SAFETY: CPU_SET is safe with a valid cpu_set_t pointer and valid CPU index.
-                unsafe {
-                    libc::CPU_SET(os_core_id, &mut cpuset);
-                }
+        if !logical_processor_ids.contains(&core_idx) {
+            error!(
+                "OS core {} in affinity mask is out of bounds of active logical cores {:?}. Skipping.",
+                core_idx, logical_processor_ids
+            );
+            return Err(Error::InvalidCoreId(core_idx));
+        }
 
-                cores_set += 1;
-
-                debug!(
-                    "Added OS core {} (index {}) to cpuset.",
-                    os_core_id, core_idx
-                );
-            } else {
-                warn!(
-                    "OS core ID {} exceeds CPU_SETSIZE {}, skipping.",
-                    os_core_id, max_cpus
-                );
+        if core_idx < max_cpus {
+            // SAFETY: CPU_SET is safe with a valid cpu_set_t pointer and valid CPU index.
+            unsafe {
+                libc::CPU_SET(core_idx, &mut cpuset);
             }
         } else {
-            warn!(
-                "Core index {} not found in logical_processor_ids, skipping.",
-                core_idx
+            error!(
+                "OS core {} exceeds CPU_SETSIZE {}, skipping.",
+                core_idx, max_cpus
             );
+            return Err(Error::Affinity(format!(
+                "OS core {} exceeds CPU_SETSIZE {}",
+                core_idx, max_cpus
+            )));
         }
     }
 
-    if cores_set == 0 {
-        error!("No valid cores could be added to the affinity mask.");
-        return Err(Error::Affinity(
-            "No valid cores could be added to the affinity mask".to_string(),
-        ));
-    }
-
-    debug!("Setting affinity to {} cores.", cores_set);
+    debug!("Setting affinity to {} cores.", mask.count());
 
     // SAFETY: sched_setaffinity is a system call that sets the CPU affinity for the calling thread.
     // pid == 0 means the calling thread, and the size of the cpu_set_t is passed.
@@ -128,7 +118,10 @@ pub(crate) fn set_thread_affinity(mask: &AffinityMask) -> Result<()> {
             err
         )))
     } else {
-        debug!("Successfully set thread affinity to {} cores.", cores_set);
+        debug!(
+            "Successfully set thread affinity to {} cores.",
+            mask.count()
+        );
         Ok(())
     }
 }
