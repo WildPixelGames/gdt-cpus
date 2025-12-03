@@ -1,6 +1,6 @@
 [package]
 name = "gdt-cpus"
-version = "25.5.0"
+version = "25.12.0"
 authors = ["Artur Wyszyński <artur.wyszynski@wildpixelgames.com>"]
 license = "MIT OR Apache-2.0"
 description = "Game Developer's Toolkit for CPU Management"
