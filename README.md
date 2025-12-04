@@ -197,7 +197,7 @@ Yep, we timestamp our releases instead of counting up semantic digits. Why? Beca
 |-----------------------|--------------|
 |Instant age check      | `25.5.0` → May 2025. No need to diff tags to see if a crate is fossilized or fresh off the compiler.|
 |Honesty about breakage | New month? Could be a breaking change. You’ll know from the number *and* from a Migration Guide `25.4` → `25.5` in the repo. We're not shy.|
-|Works fine with Cargo  | `cargo add gdt-cpus@^25.5` still pins the May 2025 API line; you won’t auto-upgrade to `26.1` unless you explicitly ask for it. Cargo gets it.|
+|Works fine with Cargo  | `cargo add gdt-cpus@=25.5` still pins the May 2025 API line; you won’t auto-upgrade to `25.12` nor `26.1` unless you explicitly ask for it. Cargo gets it.|
 |Less bike-shedding     | We’d rather spend time tuning work-steal loops and optimizing P/E core scheduling than debating whether the last commit was “minor” or “patch”. Priorities, people.|
 
 **TL;DR**:
