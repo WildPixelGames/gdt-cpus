@@ -2,263 +2,78 @@
 //!
 //! C-style Foreign Function Interface (FFI) for the `gdt-cpus` crate.
 //!
-//! This crate provides a C-compatible API to access CPU information and control
-//! thread affinity/priority using the underlying `gdt-cpus` Rust library.
+//! Mirrors the flat topology model: one [`GdtCpusLp`] record per logical
+//! processor, a first-class L3-domain table (CCDs/clusters), per-KIND caches,
+//! and N-ary core kinds (Performance / Efficiency / LP-Efficiency). There is
+//! no socket -> core object tree - socket membership is a field on each LP.
 //!
-//! It is intended for use in applications written in languages other than Rust
-//! (e.g., C, C++, C#) that need to integrate with `gdt-cpus` functionality.
-//!
-//! # Key Features:
-//! - **CPU Information:** Retrieve detailed CPU information, including vendor, model name,
-//!   core counts (physical, logical, performance, efficiency), socket details, and cache info.
-//! - **Thread Management:** Pin threads to specific cores and set thread priorities.
-//! - **Error Handling:** Functions typically return an error code (`GdtCpusErrorCode`),
-//!   and output parameters are passed as pointers.
-//! - **String Handling:** Strings returned by this API (e.g., model name) are `*const c_char`
-//!   and are valid for the lifetime of the program.
+//! Conventions:
+//! - Functions return `i32` error codes (`GdtCpusErrorCode`); `0` = success.
+//! - Results are written through out-pointers; `NULL` out-pointers return
+//!   `InvalidParameter`.
+//! - Detection runs once on first use and is cached for the process lifetime;
+//!   returned strings (`vendor_name`, `model_name`) stay valid forever after.
+//! - Affinity masks cross the FFI as arrays of OS logical-processor ids.
 //!
 //! # Usage Example (Conceptual C Code)
 //! ```c
-//! // #include "gdt_cpus.h"
-//! //
-//! // GdtCpusCpuInfo cpu_info;
-//! // if (gdt_cpus_cpu_info(&cpu_info) == GdtCpusErrorCode_Success) {
-//! //     printf("CPU Model: %s\n", cpu_info.model_name);
-//! //     printf("Physical Cores: %llu\n", cpu_info.total_physical_cores);
+//! // GdtCpusCpuInfo info;
+//! // if (gdt_cpus_cpu_info(&info) == GDT_CPUS_ERROR_CODE_SUCCESS) {
+//! //     printf("CPU: %s, %llu cores, %llu L3 domains\n",
+//! //            info.model_name, info.core_count, info.l3_domain_count);
 //! // }
-//! //
-//! // // Pin current thread to logical core 0
-//! // gdt_cpus_pin_thread_to_core(0);
-//! //
-//! // // Set thread priority to high
-//! // gdt_cpus_set_thread_priority(GDT_CPUS_THREAD_PRIORITY_TIME_CRITICAL);
+//! // // Pin to the first LP of L3 domain 0:
+//! // uint32_t lp;
+//! // gdt_cpus_get_l3_domain_lp(0, 0, &lp);
+//! // gdt_cpus_pin_thread_to_core(lp);
 //! ```
-//!
-//! See the individual function and type documentation for more details.
+
+#![deny(missing_docs)]
 
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::OnceLock;
 
-use gdt_cpus::{CoreType, ThreadPriority};
+use gdt_cpus::{AffinityMask, CoreKind, ThreadPriority};
 
-static CPU_INFO_CONTAINER: OnceLock<CpuInfoContainer> = OnceLock::new();
+/// `l3_domain` value meaning "this LP belongs to no detected L3 domain".
+pub const GDT_CPUS_NO_L3: u32 = u32::MAX;
+
+struct CpuInfoContainer {
+    info: gdt_cpus::CpuInfo,
+    model_name_storage: CString,
+    vendor_name_storage: CString,
+}
+
+static CPU_INFO_CONTAINER: OnceLock<Result<CpuInfoContainer, gdt_cpus::Error>> = OnceLock::new();
+
+fn container() -> Result<&'static CpuInfoContainer, GdtCpusErrorCode> {
+    let result = CPU_INFO_CONTAINER.get_or_init(|| {
+        let info = gdt_cpus::CpuInfo::detect()?;
+        let model_name_storage = CString::new(info.model_name.clone()).unwrap_or_default();
+        let vendor_name_storage = CString::new(info.vendor.to_string()).unwrap_or_default();
+        Ok(CpuInfoContainer {
+            info,
+            model_name_storage,
+            vendor_name_storage,
+        })
+    });
+    match result {
+        Ok(c) => Ok(c),
+        Err(e) => Err(GdtCpusErrorCode::from(e)),
+    }
+}
 
 macro_rules! get_info_validate_out_or_err {
     ($out:ident) => {{
         if $out.is_null() {
             return GdtCpusErrorCode::InvalidParameter as i32;
         }
-        match gdt_cpus::cpu_info() {
-            Ok(i) => i,
-            Err(e) => return GdtCpusErrorCode::from(&e) as i32,
+        match container() {
+            Ok(c) => c,
+            Err(code) => return code as i32,
         }
     }};
-}
-
-struct CpuInfoContainer {
-    model_name_storage: CString,
-    vendor_name_storage: CString,
-}
-
-/// Top-level structure containing all detected CPU information, exposed via FFI.
-///
-/// This structure provides a C-compatible representation of the main CPU details
-/// gathered by the `gdt-cpus` library. It is simplified for common game development needs.
-///
-/// Pointers to strings (`vendor_name`, `model_name`) within this struct are valid for the
-/// lifetime of the program after `gdt_cpus_cpu_info` has been successfully called, as
-/// the underlying data is stored in a static `OnceLock`.
-#[repr(C)]
-pub struct GdtCpusCpuInfo {
-    /// Detected CPU vendor (e.g., Intel, AMD).
-    pub vendor: GdtCpusVendor,
-    /// Pointer to a null-terminated C string representing the CPU vendor name (e.g., "GenuineIntel").
-    pub vendor_name: *const c_char,
-    /// Pointer to a null-terminated C string representing the CPU model name (e.g., "Intel(R) Core(TM) i7-8700K CPU @ 3.70GHz").
-    pub model_name: *const c_char,
-    /// Bitmask of CPU features. The meaning of bits depends on the architecture.
-    /// See [`GdtCpusCpuFeatures`] (defined per-architecture).
-    pub features: u32,
-    /// Number of CPU sockets detected and reported by the library.
-    pub sockets_count: u64,
-    /// Total number of physical CPU sockets. Often the same as `sockets_count`.
-    pub total_sockets: u64,
-    /// Total number of physical cores across all sockets.
-    pub total_physical_cores: u64,
-    /// Total number of logical processors (hardware threads) across all sockets.
-    pub total_logical_processors: u64,
-    /// Total number of performance-type physical cores (P-cores) if the CPU has a hybrid architecture.
-    /// This will be total number of physical cores on non-hybrid CPUs.
-    pub total_performance_cores: u64,
-    /// Total number of efficiency-type physical cores (E-cores) if the CPU has a hybrid architecture.
-    /// This will be 0 on non-hybrid CPUs or if the distinction is not applicable/detectable.
-    pub total_efficiency_cores: u64,
-}
-
-/// C-compatible structure representing information about a CPU cache level.
-#[repr(C)]
-pub struct GdtCpusCacheInfo {
-    /// The level of the cache (e.g., L1, L2, L3).
-    pub level: GdtCpusCacheLevel,
-    /// The type of data stored in the cache (e.g., Data, Instruction, Unified).
-    pub cache_type: GdtCpusCacheType,
-    /// Total size of the cache in bytes.
-    pub size_bytes: u64,
-    /// Size of a single cache line in bytes.
-    pub line_size_bytes: u64,
-}
-
-/// C-compatible structure representing information about a single CPU core.
-#[repr(C)]
-pub struct GdtCpusCoreInfo {
-    /// Unique identifier for this core within the system.
-    pub id: u64,
-    /// Identifier of the CPU socket this core belongs to.
-    pub socket_id: u64,
-    /// Type of the core (e.g., Performance, Efficiency).
-    pub core_type: GdtCpusCoreType,
-    /// Number of logical processors (hardware threads) this physical core provides.
-    pub logical_processor_ids_count: u64,
-    /// True if this core has a dedicated L1 instruction cache, information for which is in `l1_instruction_cache`.
-    pub has_l1_instruction_cache: bool,
-    /// L1 instruction cache information. Valid if `has_l1_instruction_cache` is true.
-    pub l1_instruction_cache: GdtCpusCacheInfo,
-    /// True if this core has a dedicated L1 data cache, information for which is in `l1_data_cache`.
-    pub has_l1_data_cache: bool,
-    /// L1 data cache information. Valid if `has_l1_data_cache` is true.
-    pub l1_data_cache: GdtCpusCacheInfo,
-    /// True if this core has a dedicated L2 cache, information for which is in `l2_cache`.
-    pub has_l2_cache: bool,
-    /// L2 cache information. Valid if `has_l2_cache` is true.
-    pub l2_cache: GdtCpusCacheInfo,
-}
-
-/// C-compatible structure representing information about a CPU socket.
-#[repr(C)]
-pub struct GdtCpusSocketInfo {
-    /// Unique identifier for this CPU socket.
-    pub id: u64,
-    /// Number of physical cores belonging to this socket.
-    pub cores_count: u64,
-    /// True if this socket has a shared L3 cache, information for which is in `l3_cache`.
-    pub has_l3_cache: bool,
-    /// L3 cache information, typically shared by cores on this socket. Valid if `has_l3_cache` is true.
-    pub l3_cache: GdtCpusCacheInfo,
-}
-
-/// C-compatible enumeration for CPU vendors.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub enum GdtCpusVendor {
-    /// Intel CPU vendor.
-    Intel = 0,
-    /// AMD CPU vendor.
-    Amd = 1,
-    /// ARM CPU vendor.
-    Arm = 2,
-    /// Apple CPU vendor.
-    Apple = 3,
-    /// Unknown CPU vendor.
-    Unknown = 4,
-    /// Vendor not recognized by the library.
-    Other = 5,
-}
-
-/// C-compatible enumeration for CPU cache levels.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub enum GdtCpusCacheLevel {
-    /// L1 cache.
-    L1 = 0,
-    /// L2 cache.
-    L2 = 1,
-    /// L3 cache.
-    L3 = 2,
-    /// L4 cache (rare).
-    L4 = 3,
-    /// Unknown cache level.
-    Unknown = 4,
-}
-
-/// C-compatible enumeration for CPU cache types.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub enum GdtCpusCacheType {
-    /// Unified cache (stores both instructions and data).
-    Unified = 0,
-    /// Instruction cache.
-    Instruction = 1,
-    /// Data cache.
-    Data = 2,
-    /// Trace cache (micro-op cache).
-    Trace = 3,
-    /// Unknown cache type.
-    Unknown = 4,
-}
-
-/// C-compatible enumeration for CPU features on x86_64 architecture.
-///
-/// This is a bitmask. A CPU might support multiple features.
-#[cfg(target_arch = "x86_64")]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub enum GdtCpusCpuFeatures {
-    /// MMX (MultiMedia eXtensions) support.
-    MMX = 0x00000001,
-    /// SSE (Streaming SIMD Extensions) support.
-    SSE = 0x00000002,
-    /// SSE2 (Streaming SIMD Extensions 2) support.
-    SSE2 = 0x00000004,
-    /// SSE3 (Streaming SIMD Extensions 3) support.
-    SSE3 = 0x00000008,
-    /// SSSE3 (Supplemental Streaming SIMD Extensions 3) support.
-    SSSE3 = 0x00000010,
-    /// SSE4.1 (Streaming SIMD Extensions 4.1) support.
-    SSE4_1 = 0x00000020,
-    /// SSE4.2 (Streaming SIMD Extensions 4.2) support.
-    SSE4_2 = 0x00000040,
-    /// FMA3 (Fused Multiply-Add 3-operand) support.
-    FMA3 = 0x00000080,
-    /// AVX (Advanced Vector Extensions) support.
-    AVX = 0x00000100,
-    /// AVX2 (Advanced Vector Extensions 2) support.
-    AVX2 = 0x00000200,
-    /// AVX-512 Foundation support.
-    AVX512F = 0x00000400,
-    /// AVX-512 Byte and Word Instructions support.
-    AVX512BW = 0x00000800,
-    /// AVX-512 Conflict Detection Instructions support.
-    AVX512CD = 0x00001000,
-    /// AVX-512 Doubleword and Quadword Instructions support.
-    AVX512DQ = 0x00002000,
-    /// AVX-512 Vector Length Extensions support.
-    AVX512VL = 0x00004000,
-    /// AES (Advanced Encryption Standard) hardware acceleration support.
-    AES = 0x00008000,
-    /// SHA (Secure Hash Algorithm) hardware acceleration support.
-    SHA = 0x00010000,
-    /// CRC32 (Cyclic Redundancy Check) hardware acceleration support.
-    CRC32 = 0x00020000,
-}
-
-/// C-compatible enumeration for CPU features on aarch64 architecture.
-///
-/// This is a bitmask. A CPU might support multiple features.
-#[cfg(target_arch = "aarch64")]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub enum GdtCpusCpuFeatures {
-    /// NEON (Advanced SIMD) support.
-    NEON = 0x00000001,
-    /// SVE (Scalable Vector Extension) support.
-    SVE = 0x00000002,
-    /// AES (Advanced Encryption Standard) hardware acceleration support.
-    AES = 0x00000004,
-    /// SHA (Secure Hash Algorithm) hardware acceleration support (SHA1, SHA256, SHA512).
-    SHA = 0x00000008,
-    /// CRC32 (Cyclic Redundancy Check) hardware acceleration support.
-    CRC32 = 0x00000010,
 }
 
 /// C-compatible enumeration for error codes returned by FFI functions.
@@ -273,173 +88,350 @@ pub enum GdtCpusErrorCode {
     Detection = -1,
     /// Invalid core ID.
     InvalidCoreId = -2,
-    /// No core of the requested type found.
-    NoCoreOfType = -3,
     /// Error setting thread affinity.
     Affinity = -4,
-    /// Unsupported operation.
+    /// Unsupported operation on this platform.
     Unsupported = -5,
     /// Permission denied.
     PermissionDenied = -6,
-    /// I/O error.
-    Io = -7,
     /// System call error.
     SystemCall = -8,
     /// Resource not found.
     NotFound = -9,
-    /// Invalid parameter.
+    /// Invalid parameter (NULL pointer, value out of range).
     InvalidParameter = -10,
-    /// Operation not implemented.
-    NotImplemented = -11,
-    /// Out of bounds error.
+    /// Index out of bounds.
     OutOfBounds = -12,
     /// Unknown error.
     Unknown = -999,
 }
 
-/// Core type enumeration.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub enum GdtCpusCoreType {
-    /// Performance core.
-    Performance = 0,
-    /// Efficiency core.
-    Efficiency = 1,
-    /// Unknown core type.
-    Unknown = 2,
+impl From<&gdt_cpus::Error> for GdtCpusErrorCode {
+    fn from(e: &gdt_cpus::Error) -> Self {
+        match e {
+            gdt_cpus::Error::Detection(_) => GdtCpusErrorCode::Detection,
+            gdt_cpus::Error::InvalidCoreId(_) => GdtCpusErrorCode::InvalidCoreId,
+            gdt_cpus::Error::Affinity(_) => GdtCpusErrorCode::Affinity,
+            gdt_cpus::Error::Unsupported(_) => GdtCpusErrorCode::Unsupported,
+            gdt_cpus::Error::PermissionDenied(_) => GdtCpusErrorCode::PermissionDenied,
+            gdt_cpus::Error::SystemCall(_) => GdtCpusErrorCode::SystemCall,
+            gdt_cpus::Error::NotFound(_) => GdtCpusErrorCode::NotFound,
+            gdt_cpus::Error::InvalidParameter(_) => GdtCpusErrorCode::InvalidParameter,
+        }
+    }
 }
 
-/// Thread priority levels.
+/// C-compatible enumeration for CPU vendors.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub enum GdtCpusThreadPriority {
-    /// Background priority.
-    ///
-    /// Example workload:
-    /// - Steam API, achievement sync, cloud saves, etc.
-    /// - Absolute background noise.
-    ///
-    /// **Note (Linux):** Uses SCHED_OTHER + `nice(19)`; under heavy load, p99 latency
-    /// can spike into **hundreds of milliseconds** or even seconds.
-    Background = 0,
-    /// Lowest priority.
-    ///
-    /// Example workload:
-    /// - Analytics, telemetry, stats collection, etc.
-    /// - Doesn’t impact gameplay in any way.
-    ///
-    /// **Note (Linux):** Uses SCHED_OTHER + `nice(15)`; tail‐latencies similar to `Background`.
-    Lowest = 1,
-    /// Below normal priority.
-    ///
-    /// Example workload:
-    /// - Async workers, secondary systems, AI planning, non-urgent gameplay systems.
-    /// - Can be preempted by higher-priority tasks.
-    ///
-    /// **Note (Linux):** Uses SCHED_OTHER + `nice(10)`; may suffer long tail‐latencies under contention.
-    BelowNormal = 2,
-    /// Normal priority.
-    ///
-    /// Example workload:
-    /// - Asset loading, streaming, prefetching, etc.
-    /// - Typically I/O-bound but latency matters.
-    ///
-    /// **Note (Linux):** Uses SCHED_OTHER + `nice(0)`; no real RT guarantees under heavy load.
-    Normal = 3,
-    /// Above normal priority.
-    ///
-    /// Example workload:
-    /// - Main game thread, logic, input, UI thread, etc.
-    /// - Needs to be responsive.
-    ///
-    /// **Note (Linux):** Uses SCHED_OTHER + `nice(-5)`; still not real-time—latency spikes possible.
-    AboveNormal = 4,
-    /// Highest priority.
-    ///
-    /// Example workload:
-    /// - Render thread, audio thread (deadline-sensitive).
-    /// - Needs to finish on time or else!
-    ///
-    /// **Note:** Maps to real-time SCHED_RR (requires CAP_SYS_NICE or root) with high absolute priority.
-    Highest = 5,
-    /// Time-critical/real-time priority (use with caution).
-    ///
-    /// Example workload:
-    /// - Worker threads on P-cores, no mercy.
-    /// - Full power, minimum latency.
-    ///
-    /// **Note:** Maps to top-end real-time SCHED_RR (requires CAP_SYS_NICE or root); virtually no tail-latency.
-    TimeCritical = 6,
+pub enum GdtCpusVendor {
+    /// Intel Corporation.
+    Intel = 0,
+    /// Advanced Micro Devices.
+    Amd = 1,
+    /// ARM reference designs.
+    Arm = 2,
+    /// Apple Silicon.
+    Apple = 3,
+    /// Unknown CPU vendor.
+    Unknown = 4,
+    /// Vendor not recognized by the library.
+    Other = 5,
+    /// Qualcomm (Snapdragon, Oryon).
+    Qualcomm = 6,
+    /// Broadcom.
+    Broadcom = 7,
+    /// NVIDIA.
+    Nvidia = 8,
+    /// Marvell / Cavium.
+    Marvell = 9,
 }
 
-impl From<&gdt_cpus::Vendor> for GdtCpusVendor {
-    fn from(vendor: &gdt_cpus::Vendor) -> Self {
-        match vendor {
+impl From<gdt_cpus::Vendor> for GdtCpusVendor {
+    fn from(v: gdt_cpus::Vendor) -> Self {
+        match v {
             gdt_cpus::Vendor::Intel => GdtCpusVendor::Intel,
             gdt_cpus::Vendor::Amd => GdtCpusVendor::Amd,
             gdt_cpus::Vendor::Arm => GdtCpusVendor::Arm,
             gdt_cpus::Vendor::Apple => GdtCpusVendor::Apple,
+            gdt_cpus::Vendor::Qualcomm => GdtCpusVendor::Qualcomm,
+            gdt_cpus::Vendor::Broadcom => GdtCpusVendor::Broadcom,
+            gdt_cpus::Vendor::Nvidia => GdtCpusVendor::Nvidia,
+            gdt_cpus::Vendor::Marvell => GdtCpusVendor::Marvell,
+            gdt_cpus::Vendor::Other => GdtCpusVendor::Other,
             gdt_cpus::Vendor::Unknown => GdtCpusVendor::Unknown,
-            gdt_cpus::Vendor::Other(_) => GdtCpusVendor::Other,
         }
     }
 }
 
-impl From<&gdt_cpus::CacheLevel> for GdtCpusCacheLevel {
-    fn from(level: &gdt_cpus::CacheLevel) -> Self {
-        match level {
-            gdt_cpus::CacheLevel::L1 => GdtCpusCacheLevel::L1,
-            gdt_cpus::CacheLevel::L2 => GdtCpusCacheLevel::L2,
-            gdt_cpus::CacheLevel::L3 => GdtCpusCacheLevel::L3,
-            gdt_cpus::CacheLevel::L4 => GdtCpusCacheLevel::L4,
-            gdt_cpus::CacheLevel::Unknown => GdtCpusCacheLevel::Unknown,
+/// Performance/efficiency classification of a CPU core.
+///
+/// N-ary on purpose: modern silicon ships more than two kinds (Intel
+/// P + E + LP-E, capacity tiers on ARM).
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum GdtCpusCoreKind {
+    /// Performance core (Intel P-core, ARM "big", Apple P).
+    Performance = 0,
+    /// Efficiency core (Intel E-core, ARM "LITTLE", AMD dense, Apple E).
+    Efficiency = 1,
+    /// Low-power efficiency core (Intel LP-E, lowest ARM capacity tier).
+    LpEfficiency = 2,
+    /// Unknown core kind (never produced on homogeneous machines -
+    /// the classification invariant is "homogeneous means all Performance").
+    Unknown = 3,
+}
+
+impl From<CoreKind> for GdtCpusCoreKind {
+    fn from(k: CoreKind) -> Self {
+        match k {
+            CoreKind::Performance => GdtCpusCoreKind::Performance,
+            CoreKind::Efficiency => GdtCpusCoreKind::Efficiency,
+            CoreKind::LpEfficiency => GdtCpusCoreKind::LpEfficiency,
+            CoreKind::Unknown => GdtCpusCoreKind::Unknown,
         }
     }
 }
 
-impl From<&gdt_cpus::CacheType> for GdtCpusCacheType {
-    fn from(cache_type: &gdt_cpus::CacheType) -> Self {
-        match cache_type {
-            gdt_cpus::CacheType::Unified => GdtCpusCacheType::Unified,
-            gdt_cpus::CacheType::Instruction => GdtCpusCacheType::Instruction,
-            gdt_cpus::CacheType::Data => GdtCpusCacheType::Data,
-            gdt_cpus::CacheType::Trace => GdtCpusCacheType::Trace,
-            gdt_cpus::CacheType::Unknown => GdtCpusCacheType::Unknown,
-        }
+fn kind_from_ffi(kind: GdtCpusCoreKind) -> CoreKind {
+    match kind {
+        GdtCpusCoreKind::Performance => CoreKind::Performance,
+        GdtCpusCoreKind::Efficiency => CoreKind::Efficiency,
+        GdtCpusCoreKind::LpEfficiency => CoreKind::LpEfficiency,
+        GdtCpusCoreKind::Unknown => CoreKind::Unknown,
     }
 }
 
-impl From<&gdt_cpus::Error> for GdtCpusErrorCode {
-    fn from(err: &gdt_cpus::Error) -> Self {
-        match err {
-            gdt_cpus::Error::Detection(_) => GdtCpusErrorCode::Detection,
-            gdt_cpus::Error::InvalidCoreId(_) => GdtCpusErrorCode::InvalidCoreId,
-            gdt_cpus::Error::NoCoreOfType(_) => GdtCpusErrorCode::NoCoreOfType,
-            gdt_cpus::Error::Affinity(_) => GdtCpusErrorCode::Affinity,
-            gdt_cpus::Error::Unsupported(_) => GdtCpusErrorCode::Unsupported,
-            gdt_cpus::Error::PermissionDenied(_) => GdtCpusErrorCode::PermissionDenied,
-            gdt_cpus::Error::Io(_) => GdtCpusErrorCode::Io,
-            gdt_cpus::Error::SystemCall(_) => GdtCpusErrorCode::SystemCall,
-            gdt_cpus::Error::NotFound(_) => GdtCpusErrorCode::NotFound,
-            gdt_cpus::Error::InvalidParameter(_) => GdtCpusErrorCode::InvalidParameter,
-            gdt_cpus::Error::NotImplemented => GdtCpusErrorCode::NotImplemented,
+/// Reconstructs a `#[repr(C)]` FFI enum from the raw integer a C caller passed,
+/// returning `None` for any value that is not a declared discriminant.
+///
+/// Every public entry point accepts the enum's `i32` repr (not the enum) by value
+/// and validates it here. Taking the integer is what keeps the boundary sound:
+/// materializing an out-of-range enum value at the ABI edge is undefined behavior.
+macro_rules! ffi_enum_from_i32 {
+    ($name:ident, $ty:ty, [$($variant:ident),+ $(,)?]) => {
+        fn $name(v: i32) -> Option<$ty> {
+            [$(<$ty>::$variant),+].into_iter().find(|&e| e as i32 == v)
         }
-    }
+    };
 }
 
-impl From<&gdt_cpus::CoreType> for GdtCpusCoreType {
-    fn from(ct: &CoreType) -> Self {
-        match ct {
-            CoreType::Performance => GdtCpusCoreType::Performance,
-            CoreType::Efficiency => GdtCpusCoreType::Efficiency,
-            CoreType::Unknown => GdtCpusCoreType::Unknown,
-        }
-    }
+ffi_enum_from_i32!(
+    error_code_from_i32,
+    GdtCpusErrorCode,
+    [
+        Success,
+        Detection,
+        InvalidCoreId,
+        Affinity,
+        Unsupported,
+        PermissionDenied,
+        SystemCall,
+        NotFound,
+        InvalidParameter,
+        OutOfBounds,
+        Unknown,
+    ]
+);
+ffi_enum_from_i32!(
+    vendor_from_i32,
+    GdtCpusVendor,
+    [
+        Intel, Amd, Arm, Apple, Unknown, Other, Qualcomm, Broadcom, Nvidia, Marvell
+    ]
+);
+ffi_enum_from_i32!(
+    core_kind_ffi_from_i32,
+    GdtCpusCoreKind,
+    [Performance, Efficiency, LpEfficiency, Unknown]
+);
+ffi_enum_from_i32!(
+    thread_priority_ffi_from_i32,
+    GdtCpusThreadPriority,
+    [
+        Background,
+        Lowest,
+        BelowNormal,
+        Normal,
+        AboveNormal,
+        Highest,
+        TimeCritical
+    ]
+);
+ffi_enum_from_i32!(grant_from_i32, GdtCpusGrant, [Direct, Brokered, Realtime]);
+ffi_enum_from_i32!(
+    fallback_reason_from_i32,
+    GdtCpusFallbackReason,
+    [None, NoBroker, BrokerTimedOut, BrokerRefused, Clamped]
+);
+ffi_enum_from_i32!(
+    broker_error_from_i32,
+    GdtCpusBrokerError,
+    [
+        None,
+        AccessDenied,
+        LimitsExceeded,
+        InvalidArgs,
+        Failed,
+        Other
+    ]
+);
+
+/// Validates a C `int` core-kind argument into the internal [`CoreKind`].
+fn core_kind_from_i32(v: i32) -> Option<CoreKind> {
+    core_kind_ffi_from_i32(v).map(kind_from_ffi)
+}
+
+/// Validates a C `int` priority argument into the internal [`ThreadPriority`].
+fn thread_priority_from_i32(v: i32) -> Option<ThreadPriority> {
+    thread_priority_ffi_from_i32(v).map(Into::into)
+}
+
+/// C-compatible enumeration for CPU features on x86_64 architecture (bitmask).
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum GdtCpusCpuFeatures {
+    /// MMX support.
+    MMX = 0x00000001,
+    /// SSE support.
+    SSE = 0x00000002,
+    /// SSE2 support.
+    SSE2 = 0x00000004,
+    /// SSE3 support.
+    SSE3 = 0x00000008,
+    /// SSSE3 support.
+    SSSE3 = 0x00000010,
+    /// SSE4.1 support.
+    SSE4_1 = 0x00000020,
+    /// SSE4.2 support.
+    SSE4_2 = 0x00000040,
+    /// FMA3 support.
+    FMA3 = 0x00000080,
+    /// AVX support.
+    AVX = 0x00000100,
+    /// AVX2 support.
+    AVX2 = 0x00000200,
+    /// AVX-512 Foundation support.
+    AVX512F = 0x00000400,
+    /// AVX-512 Byte and Word Instructions support.
+    AVX512BW = 0x00000800,
+    /// AVX-512 Conflict Detection Instructions support.
+    AVX512CD = 0x00001000,
+    /// AVX-512 Doubleword and Quadword Instructions support.
+    AVX512DQ = 0x00002000,
+    /// AVX-512 Vector Length Extensions support.
+    AVX512VL = 0x00004000,
+    /// AES hardware acceleration support.
+    AES = 0x00008000,
+    /// SHA hardware acceleration support.
+    SHA = 0x00010000,
+    /// CRC32 hardware acceleration support.
+    CRC32 = 0x00020000,
+    /// POPCNT (population count) support.
+    POPCNT = 0x00040000,
+    /// BMI1 (bit manipulation 1: ANDN/BLSI/TZCNT) support.
+    BMI1 = 0x00080000,
+    /// BMI2 (bit manipulation 2: PDEP/PEXT/BZHI) support.
+    BMI2 = 0x00100000,
+    /// F16C (half-precision float conversion) support.
+    F16C = 0x00200000,
+}
+
+/// C-compatible enumeration for CPU features on aarch64 architecture (bitmask).
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum GdtCpusCpuFeatures {
+    /// NEON (Advanced SIMD) support.
+    NEON = 0x00000001,
+    /// SVE (Scalable Vector Extension) support.
+    SVE = 0x00000002,
+    /// AES hardware acceleration support.
+    AES = 0x00000004,
+    /// SHA hardware acceleration support (SHA1/SHA256/SHA512).
+    SHA = 0x00000008,
+    /// CRC32 hardware acceleration support.
+    CRC32 = 0x00000010,
+    /// FP16 (half-precision arithmetic, FEAT_FP16) support.
+    FP16 = 0x00000020,
+    /// DotProd (int8 dot product, FEAT_DotProd) support.
+    DOTPROD = 0x00000040,
+    /// I8MM (int8 matrix multiply, FEAT_I8MM) support.
+    I8MM = 0x00000080,
+    /// BF16 (bfloat16, FEAT_BF16) support.
+    BF16 = 0x00000100,
+    /// SVE2 (Scalable Vector Extension 2) support.
+    SVE2 = 0x00000200,
+    /// LSE (Large System Extensions atomics, FEAT_LSE) support.
+    LSE = 0x00000400,
+    /// JSCVT (JavaScript conversion instruction, FEAT_JSCVT) support.
+    JSCVT = 0x00000800,
+    /// LRCPC (Load-Acquire RCpc instructions, FEAT_LRCPC) support.
+    LRCPC = 0x00001000,
+    /// PMULL (polynomial multiply, FEAT_PMULL) support.
+    PMULL = 0x00002000,
+    /// RDM (rounding doubling multiply-add, FEAT_RDM) support.
+    RDM = 0x00004000,
+    /// FHM (half-precision multiply-add, FEAT_FHM) support.
+    FHM = 0x00008000,
+    /// FCMA (floating-point complex multiply-add, FEAT_FCMA) support.
+    FCMA = 0x00010000,
+    /// LSE2 (Large System Extensions 2 atomics, FEAT_LSE2) support.
+    LSE2 = 0x00020000,
+    /// LRCPC2 (immediate-offset RCpc load-acquire, FEAT_LRCPC2) support.
+    LRCPC2 = 0x00040000,
+    /// SM3 cryptographic hash instructions (FEAT_SM3) support.
+    SM3 = 0x00080000,
+    /// SM4 cryptographic cipher instructions (FEAT_SM4) support.
+    SM4 = 0x00100000,
+    /// SVE AES instructions (FEAT_SVE_AES) support.
+    SVEAES = 0x00200000,
+    /// SVE PMULL instructions (FEAT_SVE_PMULL128) support.
+    SVEPMULL = 0x00400000,
+    /// SVE bit permutation instructions (FEAT_SVE_BitPerm) support.
+    SVEBITPERM = 0x00800000,
+    /// SVE SHA3 instructions (FEAT_SVE_SHA3) support.
+    SVESHA3 = 0x01000000,
+    /// SVE SM4 instructions (FEAT_SVE_SM4) support.
+    SVESM4 = 0x02000000,
+    /// SVE I8MM instructions (FEAT_SVE_I8MM) support.
+    SVEI8MM = 0x04000000,
+    /// SVE BF16 instructions (FEAT_SVE_BF16) support.
+    SVEBF16 = 0x08000000,
+}
+
+/// Thread priority levels (7 portable levels mapped onto each OS scheduler).
+///
+/// Linux: a pure timeshare-nice ladder (19/10/5/0/-5/-10/-20); negative nice is
+/// negotiated through rtkit when the direct syscall is denied. Pass the
+/// `GdtCpusAppliedPriority` out-param of `gdt_cpus_set_thread_priority` to learn
+/// what actually stuck. macOS: QoS classes (real-time via the consent API,
+/// `gdt_cpus_promote_thread_to_realtime`). Windows:
+/// `THREAD_PRIORITY_IDLE..TIME_CRITICAL`.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum GdtCpusThreadPriority {
+    /// Background noise (cloud saves, achievement sync).
+    Background = 0,
+    /// Analytics, telemetry.
+    Lowest = 1,
+    /// Async workers, AI planning.
+    BelowNormal = 2,
+    /// Asset loading/streaming.
+    Normal = 3,
+    /// Game logic helpers.
+    AboveNormal = 4,
+    /// Render/audio-adjacent workers.
+    Highest = 5,
+    /// Audio mixer thread territory. Linux uses the strongest timeshare slot;
+    /// explicit real-time is `gdt_cpus_promote_thread_to_realtime`.
+    TimeCritical = 6,
 }
 
 impl From<GdtCpusThreadPriority> for ThreadPriority {
-    fn from(tp: GdtCpusThreadPriority) -> Self {
-        match tp {
+    fn from(p: GdtCpusThreadPriority) -> Self {
+        match p {
             GdtCpusThreadPriority::Background => ThreadPriority::Background,
             GdtCpusThreadPriority::Lowest => ThreadPriority::Lowest,
             GdtCpusThreadPriority::BelowNormal => ThreadPriority::BelowNormal,
@@ -451,1374 +443,858 @@ impl From<GdtCpusThreadPriority> for ThreadPriority {
     }
 }
 
+impl From<ThreadPriority> for GdtCpusThreadPriority {
+    fn from(p: ThreadPriority) -> Self {
+        match p {
+            ThreadPriority::Background => GdtCpusThreadPriority::Background,
+            ThreadPriority::Lowest => GdtCpusThreadPriority::Lowest,
+            ThreadPriority::BelowNormal => GdtCpusThreadPriority::BelowNormal,
+            ThreadPriority::Normal => GdtCpusThreadPriority::Normal,
+            ThreadPriority::AboveNormal => GdtCpusThreadPriority::AboveNormal,
+            ThreadPriority::Highest => GdtCpusThreadPriority::Highest,
+            ThreadPriority::TimeCritical => GdtCpusThreadPriority::TimeCritical,
+        }
+    }
+}
+
+/// How a thread-priority request was satisfied - which tier it landed in,
+/// orthogonal to whether it fell short (that is [`GdtCpusFallbackReason`]).
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum GdtCpusGrant {
+    /// Applied directly by the OS scheduler.
+    Direct = 0,
+    /// Negotiated through a privilege broker (Linux rtkit / xdg portal).
+    Brokered = 1,
+    /// A real-time policy was engaged (macOS SCHED_RR, or the consent API).
+    Realtime = 2,
+}
+
+impl From<gdt_cpus::Grant> for GdtCpusGrant {
+    fn from(g: gdt_cpus::Grant) -> Self {
+        match g {
+            gdt_cpus::Grant::Direct => GdtCpusGrant::Direct,
+            gdt_cpus::Grant::Brokered => GdtCpusGrant::Brokered,
+            gdt_cpus::Grant::Realtime => GdtCpusGrant::Realtime,
+        }
+    }
+}
+
+/// Why a priority request didn't get a clean, direct grant of what was asked.
+///
+/// `None` (0) is the no-news sentinel: you got the requested level. The rest
+/// answer "my engine feels wonky on this box - what did my priority actually
+/// do?" as DATA, never a hidden log line. `NoBroker`/`BrokerTimedOut`/
+/// `BrokerRefused` mean you fell back to `Normal`; `Clamped` kept the level but
+/// at the broker's ceiling (rtkit's `MinNiceLevel`, default -15).
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum GdtCpusFallbackReason {
+    /// Clean grant - exactly what was requested. No fallback.
+    None = 0,
+    /// Direct denied and no broker available. Fell back to `Normal`.
+    NoBroker = 1,
+    /// Broker reached but timed out (transient). Fell back to `Normal`.
+    BrokerTimedOut = 2,
+    /// Broker reached and refused (policy / rate limit). Fell back to `Normal`.
+    BrokerRefused = 3,
+    /// Broker granted but weaker than asked (hit its ceiling). Kept the level.
+    Clamped = 4,
+}
+
+impl From<gdt_cpus::FallbackReason> for GdtCpusFallbackReason {
+    fn from(r: gdt_cpus::FallbackReason) -> Self {
+        match r {
+            gdt_cpus::FallbackReason::NoBroker => GdtCpusFallbackReason::NoBroker,
+            gdt_cpus::FallbackReason::BrokerTimedOut => GdtCpusFallbackReason::BrokerTimedOut,
+            gdt_cpus::FallbackReason::BrokerRefused => GdtCpusFallbackReason::BrokerRefused,
+            gdt_cpus::FallbackReason::Clamped => GdtCpusFallbackReason::Clamped,
+        }
+    }
+}
+
+/// The typed reason a broker REFUSED a grant - the C mirror of Rust's
+/// `BrokerError`, carried by `GdtCpusAppliedPriority::broker_error`.
+///
+/// `None` (0) is the sentinel: no broker refusal (the grant succeeded, or it
+/// failed some other way - see `reason`). The rest are set only when
+/// `reason == BrokerRefused`. Branch on `AccessDenied` (policy / no session -
+/// give up) vs `LimitsExceeded` (rate limit - back off and retry).
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum GdtCpusBrokerError {
+    /// No broker refusal (clean grant, or a non-refusal failure).
+    None = 0,
+    /// Policy denied - polkit, or no active/seated login session. Give up.
+    AccessDenied = 1,
+    /// Broker rate limit hit. Transient - back off and retry.
+    LimitsExceeded = 2,
+    /// Broker rejected the arguments (bad priority / version skew).
+    InvalidArgs = 3,
+    /// Generic daemon-side failure.
+    Failed = 4,
+    /// An error name this version doesn't map (cause is in the rtkit journal).
+    Other = 5,
+}
+
+impl From<gdt_cpus::BrokerError> for GdtCpusBrokerError {
+    fn from(e: gdt_cpus::BrokerError) -> Self {
+        match e {
+            gdt_cpus::BrokerError::AccessDenied => GdtCpusBrokerError::AccessDenied,
+            gdt_cpus::BrokerError::LimitsExceeded => GdtCpusBrokerError::LimitsExceeded,
+            gdt_cpus::BrokerError::InvalidArgs => GdtCpusBrokerError::InvalidArgs,
+            gdt_cpus::BrokerError::Failed => GdtCpusBrokerError::Failed,
+            // `BrokerError` is `#[non_exhaustive]`: any name added later maps here.
+            _ => GdtCpusBrokerError::Other,
+        }
+    }
+}
+
+/// Which OS scheduler API set a thread's priority - the C mirror of Rust's
+/// `MechanismPolicy`. Says how to read `GdtCpusMechanism::value`.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum GdtCpusMechanismPolicy {
+    /// Linux `SCHED_OTHER` setpriority - `value` is the nice (-20..19).
+    Nice = 0,
+    /// `SCHED_RR` real-time - `value` is the RR priority (Linux RT, macOS TimeCritical).
+    SchedRr = 1,
+    /// POSIX `SCHED_OTHER` sched_priority band - `value` is the band (macOS QoS opt-out).
+    SchedOther = 2,
+    /// macOS QoS - `value` is a QoS class ordinal (0 background .. 4 user_interactive).
+    Qos = 3,
+    /// Windows `SetThreadPriority` - `value` is the THREAD_PRIORITY constant (-15..15).
+    WinPriority = 4,
+}
+
+impl From<gdt_cpus::MechanismPolicy> for GdtCpusMechanismPolicy {
+    fn from(p: gdt_cpus::MechanismPolicy) -> Self {
+        match p {
+            gdt_cpus::MechanismPolicy::Nice => GdtCpusMechanismPolicy::Nice,
+            gdt_cpus::MechanismPolicy::SchedRr => GdtCpusMechanismPolicy::SchedRr,
+            gdt_cpus::MechanismPolicy::SchedOther => GdtCpusMechanismPolicy::SchedOther,
+            gdt_cpus::MechanismPolicy::Qos => GdtCpusMechanismPolicy::Qos,
+            gdt_cpus::MechanismPolicy::WinPriority => GdtCpusMechanismPolicy::WinPriority,
+        }
+    }
+}
+
+/// The concrete OS scheduling mechanism a request landed on - the C mirror of
+/// Rust's `Mechanism`. `value` is read per `policy` (nice / RR priority / QoS
+/// class ordinal / sched_priority band / THREAD_PRIORITY constant).
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GdtCpusMechanism {
+    /// Which OS scheduler API set the priority.
+    pub policy: GdtCpusMechanismPolicy,
+    /// The applied parameter, interpreted per `policy`.
+    pub value: i8,
+}
+
+impl From<gdt_cpus::Mechanism> for GdtCpusMechanism {
+    fn from(m: gdt_cpus::Mechanism) -> Self {
+        GdtCpusMechanism {
+            policy: m.policy.into(),
+            value: m.value,
+        }
+    }
+}
+
+/// What a thread-priority request actually produced - the C mirror of Rust's
+/// `AppliedPriority`.
+///
+/// A "successful" set on Linux can still mean you silently landed on `Normal`,
+/// so for audio/render threads branch on `grant`/`reason`, not just the return
+/// code. `reason == None` is a clean grant; `effective` differs from `requested`
+/// only on a true fallback (a `Clamped` keeps the level, just weaker).
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GdtCpusAppliedPriority {
+    /// The level the caller requested.
+    pub requested: GdtCpusThreadPriority,
+    /// The level actually in effect (weaker than `requested` = a fallback).
+    pub effective: GdtCpusThreadPriority,
+    /// How the request was satisfied.
+    pub grant: GdtCpusGrant,
+    /// Why it fell short, or `None` for a clean grant.
+    pub reason: GdtCpusFallbackReason,
+    /// The typed broker-refusal reason - set (non-`None`) only when
+    /// `reason == BrokerRefused`.
+    pub broker_error: GdtCpusBrokerError,
+    /// The concrete OS scheduling mechanism the request landed on (typed data).
+    pub mechanism: GdtCpusMechanism,
+}
+
+impl From<&gdt_cpus::AppliedPriority> for GdtCpusAppliedPriority {
+    fn from(a: &gdt_cpus::AppliedPriority) -> Self {
+        GdtCpusAppliedPriority {
+            requested: a.requested().into(),
+            effective: a.effective().into(),
+            grant: a.grant().into(),
+            reason: a.reason().map_or(GdtCpusFallbackReason::None, Into::into),
+            broker_error: a
+                .broker_error()
+                .map_or(GdtCpusBrokerError::None, Into::into),
+            mechanism: a.mechanism().into(),
+        }
+    }
+}
+
+/// What each priority level will resolve to under this process's privileges -
+/// the C mirror of Rust's `PriorityCaps`. A planning hint (rtkit can withdraw
+/// cooperation later), not a contract.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GdtCpusPriorityCaps {
+    /// Effective strength rank per level, indexed by `GdtCpusThreadPriority`
+    /// (`Background` = 0 … `TimeCritical` = 6); higher = stronger. Two levels
+    /// with the same rank are indistinguishable on this box.
+    pub effective_rank: [u8; 7],
+    /// Number of effectively distinct levels (7 = the full ladder works; fewer
+    /// means the top collapsed, e.g. unprivileged Linux without rtkit).
+    pub distinct_levels: u8,
+}
+
+/// Size, line size and sharing degree of one cache instance.
+///
+/// `size_bytes == 0` means "not detected". `shared_by` is the number of
+/// logical processors sharing ONE instance of this cache (2 = core-private
+/// with SMT; >2 = cluster-shared, e.g. Intel E-core L2).
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GdtCpusCacheInfo {
+    /// Total size in bytes (0 = not detected).
+    pub size_bytes: u64,
+    /// Cache line size in bytes (typically 64).
+    pub line_bytes: u32,
+    /// Logical processors sharing one instance of this cache.
+    pub shared_by: u32,
+}
+
 impl From<&gdt_cpus::CacheInfo> for GdtCpusCacheInfo {
-    fn from(cache: &gdt_cpus::CacheInfo) -> Self {
+    fn from(c: &gdt_cpus::CacheInfo) -> Self {
         GdtCpusCacheInfo {
-            level: GdtCpusCacheLevel::from(&cache.level),
-            cache_type: GdtCpusCacheType::from(&cache.cache_type),
-            size_bytes: cache.size_bytes,
-            line_size_bytes: cache.line_size_bytes as u64,
+            size_bytes: c.size_bytes,
+            line_bytes: c.line_bytes as u32,
+            shared_by: c.shared_by as u32,
         }
     }
 }
 
-impl From<&gdt_cpus::SocketInfo> for GdtCpusSocketInfo {
-    fn from(socket: &gdt_cpus::SocketInfo) -> Self {
-        GdtCpusSocketInfo {
-            id: socket.id as u64,
-            cores_count: socket.cores.len() as u64,
-            has_l3_cache: socket.l3_cache.is_some(),
-            l3_cache: if let Some(l3_cache) = &socket.l3_cache {
-                GdtCpusCacheInfo::from(l3_cache)
-            } else {
-                GdtCpusCacheInfo::default()
-            },
-        }
-    }
+/// One record per ONLINE logical processor - the flat topology's atom.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GdtCpusLp {
+    /// OS logical-processor id. Affinity addresses THESE ids.
+    pub os_id: u32,
+    /// Dense library-assigned physical core index, `0..core_count`.
+    pub core: u32,
+    /// Dense socket index.
+    pub socket: u32,
+    /// Index into the L3-domain table, or `GDT_CPUS_NO_L3`.
+    pub l3_domain: u32,
+    /// OS NUMA node id (0 on single-node systems and macOS).
+    pub numa_node: u32,
+    /// Performance/efficiency classification of this LP's physical core.
+    pub kind: GdtCpusCoreKind,
+    /// 0 = first SMT sibling on its physical core.
+    pub smt_index: u32,
+    /// Relative performance hint - ordinal and machine-local: higher = faster
+    /// core on THIS machine, equal = indistinguishable, scale differs per OS
+    /// (Linux cpu_capacity 0-1024, Windows EfficiencyClass, macOS perflevel
+    /// order). 0 = no finer signal than `kind`. Use to pick the best cores
+    /// within a kind (ARM prime-vs-mid, Intel favored cores).
+    pub perf_hint: u32,
+    /// Raw ARM MIDR part number of this core's microarch (e.g. 0x0d0b =
+    /// Cortex-A76), read per-core from /proc/cpuinfo. 0 when absent (x86, or not
+    /// reported). With the chip vendor (= MIDR implementer) it names the
+    /// microarchitecture; no part->name table is shipped. NOT a kind signal.
+    pub cpu_part: u32,
 }
 
-impl From<&gdt_cpus::CoreInfo> for GdtCpusCoreInfo {
-    fn from(core: &gdt_cpus::CoreInfo) -> Self {
-        GdtCpusCoreInfo {
-            id: core.id as u64,
-            socket_id: core.socket_id as u64,
-            core_type: GdtCpusCoreType::from(&core.core_type),
-            logical_processor_ids_count: core.logical_processor_ids.len() as u64,
-            has_l1_instruction_cache: core.l1_instruction_cache.is_some(),
-            l1_instruction_cache: if let Some(l1i_cache) = &core.l1_instruction_cache {
-                GdtCpusCacheInfo::from(l1i_cache)
-            } else {
-                GdtCpusCacheInfo::default()
-            },
-            has_l1_data_cache: core.l1_data_cache.is_some(),
-            l1_data_cache: if let Some(l1d_cache) = &core.l1_data_cache {
-                GdtCpusCacheInfo::from(l1d_cache)
-            } else {
-                GdtCpusCacheInfo::default()
-            },
-            has_l2_cache: core.l2_cache.is_some(),
-            l2_cache: if let Some(l2_cache) = &core.l2_cache {
-                GdtCpusCacheInfo::from(l2_cache)
-            } else {
-                GdtCpusCacheInfo::default()
-            },
-        }
-    }
+/// A set of cores sharing one L3 cache instance (a CCD on chiplet AMD,
+/// a cluster on hybrid Intel). Enumerate its LPs with
+/// [`gdt_cpus_get_l3_domain_lp`].
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GdtCpusL3Domain {
+    /// Size of this L3 instance in bytes.
+    pub size_bytes: u64,
+    /// Physical cores in this domain (SMT siblings counted once).
+    pub core_count: u32,
+    /// Logical processors in this domain.
+    pub lp_count: u32,
 }
 
-impl Default for GdtCpusCacheInfo {
-    fn default() -> Self {
-        GdtCpusCacheInfo {
-            level: GdtCpusCacheLevel::Unknown,
-            cache_type: GdtCpusCacheType::Unknown,
-            size_bytes: 0,
-            line_size_bytes: 0,
-        }
-    }
+/// Top-level CPU summary. Per-LP records, L3 domains and per-kind caches are
+/// read through the accessor functions.
+#[repr(C)]
+pub struct GdtCpusCpuInfo {
+    /// Detected CPU vendor.
+    pub vendor: GdtCpusVendor,
+    /// Null-terminated vendor name; valid for the process lifetime.
+    pub vendor_name: *const c_char,
+    /// Null-terminated model name; valid for the process lifetime.
+    pub model_name: *const c_char,
+    /// Bitmask of CPU features (see `GdtCpusCpuFeatures` for the bits).
+    pub features: u32,
+    /// Number of online logical processors.
+    pub lp_count: u64,
+    /// Number of physical cores (SMT siblings counted once).
+    pub core_count: u64,
+    /// Number of CPU sockets.
+    pub socket_count: u64,
+    /// Number of NUMA nodes (1 on single-node systems).
+    pub numa_node_count: u64,
+    /// Number of L3 cache domains (CCDs/clusters).
+    pub l3_domain_count: u64,
+    /// Physical cores classified as Performance.
+    pub performance_cores: u64,
+    /// Physical cores classified as Efficiency.
+    pub efficiency_cores: u64,
+    /// Physical cores classified as Low-Power Efficiency.
+    pub lp_efficiency_cores: u64,
 }
 
-/// Returns a description of the error code.
+// ---------------------------------------------------------------------------
+// Description helpers
+// ---------------------------------------------------------------------------
+
+/// Returns a static, null-terminated description of an error code.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_error_code_description(error_code: GdtCpusErrorCode) -> *const c_char {
-    let description = match error_code {
-        GdtCpusErrorCode::Success => c"Success",
-        GdtCpusErrorCode::Detection => c"CPU detection error",
-        GdtCpusErrorCode::InvalidCoreId => c"Invalid core ID",
-        GdtCpusErrorCode::NoCoreOfType => c"No core of the requested type found",
-        GdtCpusErrorCode::Affinity => c"Thread affinity error",
-        GdtCpusErrorCode::Unsupported => c"Unsupported operation",
-        GdtCpusErrorCode::PermissionDenied => c"Permission denied",
-        GdtCpusErrorCode::Io => c"I/O error",
-        GdtCpusErrorCode::SystemCall => c"System call error",
-        GdtCpusErrorCode::NotFound => c"Not found",
-        GdtCpusErrorCode::InvalidParameter => c"Invalid parameter",
-        GdtCpusErrorCode::NotImplemented => c"Operation not implemented",
-        _ => c"Unknown error",
+pub extern "C" fn gdt_cpus_error_code_description(error_code: i32) -> *const c_char {
+    let Some(error_code) = error_code_from_i32(error_code) else {
+        return std::ptr::null();
     };
-
-    description.as_ptr()
+    let s: &'static [u8] = match error_code {
+        GdtCpusErrorCode::Success => b"Success\0",
+        GdtCpusErrorCode::Detection => b"CPU detection error\0",
+        GdtCpusErrorCode::InvalidCoreId => b"Invalid core ID\0",
+        GdtCpusErrorCode::Affinity => b"Thread affinity error\0",
+        GdtCpusErrorCode::Unsupported => b"Unsupported operation\0",
+        GdtCpusErrorCode::PermissionDenied => b"Permission denied\0",
+        GdtCpusErrorCode::SystemCall => b"System call error\0",
+        GdtCpusErrorCode::NotFound => b"Not found\0",
+        GdtCpusErrorCode::InvalidParameter => b"Invalid parameter\0",
+        GdtCpusErrorCode::OutOfBounds => b"Index out of bounds\0",
+        GdtCpusErrorCode::Unknown => b"Unknown error\0",
+    };
+    s.as_ptr() as *const c_char
 }
 
-/// Returns a description of the CPU vendor.
+/// Returns a static, null-terminated description of a vendor.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_vendor_description(vendor: GdtCpusVendor) -> *const c_char {
-    let description = match vendor {
-        GdtCpusVendor::Intel => c"Intel",
-        GdtCpusVendor::Amd => c"AMD",
-        GdtCpusVendor::Arm => c"ARM",
-        GdtCpusVendor::Apple => c"Apple",
-        GdtCpusVendor::Unknown => c"Unknown",
-        GdtCpusVendor::Other => c"Other",
+pub extern "C" fn gdt_cpus_vendor_description(vendor: i32) -> *const c_char {
+    let Some(vendor) = vendor_from_i32(vendor) else {
+        return std::ptr::null();
     };
-
-    description.as_ptr()
+    let s: &'static [u8] = match vendor {
+        GdtCpusVendor::Intel => b"Intel\0",
+        GdtCpusVendor::Amd => b"AMD\0",
+        GdtCpusVendor::Arm => b"ARM\0",
+        GdtCpusVendor::Apple => b"Apple\0",
+        GdtCpusVendor::Qualcomm => b"Qualcomm\0",
+        GdtCpusVendor::Broadcom => b"Broadcom\0",
+        GdtCpusVendor::Nvidia => b"NVIDIA\0",
+        GdtCpusVendor::Marvell => b"Marvell\0",
+        GdtCpusVendor::Other => b"Other\0",
+        GdtCpusVendor::Unknown => b"Unknown\0",
+    };
+    s.as_ptr() as *const c_char
 }
 
-/// Returns a description of the cache level.
+/// Returns a static, null-terminated description of a core kind.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_cache_level_description(cache_level: GdtCpusCacheLevel) -> *const c_char {
-    let description = match cache_level {
-        GdtCpusCacheLevel::L1 => c"L1",
-        GdtCpusCacheLevel::L2 => c"L2",
-        GdtCpusCacheLevel::L3 => c"L3",
-        GdtCpusCacheLevel::L4 => c"L4",
-        GdtCpusCacheLevel::Unknown => c"Unknown Cache Level",
+pub extern "C" fn gdt_cpus_core_kind_description(kind: i32) -> *const c_char {
+    let Some(kind) = core_kind_ffi_from_i32(kind) else {
+        return std::ptr::null();
     };
-
-    description.as_ptr()
+    let s: &'static [u8] = match kind {
+        GdtCpusCoreKind::Performance => b"Performance\0",
+        GdtCpusCoreKind::Efficiency => b"Efficiency\0",
+        GdtCpusCoreKind::LpEfficiency => b"LP-Efficiency\0",
+        GdtCpusCoreKind::Unknown => b"Unknown\0",
+    };
+    s.as_ptr() as *const c_char
 }
 
-/// Returns a description of the cache type.
+/// Returns a static, null-terminated description of a thread priority level.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_cache_type_description(cache_type: GdtCpusCacheType) -> *const c_char {
-    let description = match cache_type {
-        GdtCpusCacheType::Unified => c"Unified",
-        GdtCpusCacheType::Instruction => c"Instruction",
-        GdtCpusCacheType::Data => c"Data",
-        GdtCpusCacheType::Trace => c"Trace",
-        GdtCpusCacheType::Unknown => c"Unknown Cache Type",
+pub extern "C" fn gdt_cpus_thread_priority_description(priority: i32) -> *const c_char {
+    let Some(priority) = thread_priority_ffi_from_i32(priority) else {
+        return std::ptr::null();
     };
-
-    description.as_ptr()
+    let s: &'static [u8] = match priority {
+        GdtCpusThreadPriority::Background => b"Background\0",
+        GdtCpusThreadPriority::Lowest => b"Lowest\0",
+        GdtCpusThreadPriority::BelowNormal => b"BelowNormal\0",
+        GdtCpusThreadPriority::Normal => b"Normal\0",
+        GdtCpusThreadPriority::AboveNormal => b"AboveNormal\0",
+        GdtCpusThreadPriority::Highest => b"Highest\0",
+        GdtCpusThreadPriority::TimeCritical => b"TimeCritical\0",
+    };
+    s.as_ptr() as *const c_char
 }
 
-/// Returns a description of the core type.
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_core_type_description(core_type: GdtCpusCoreType) -> *const c_char {
-    let description = match core_type {
-        GdtCpusCoreType::Performance => c"Performance",
-        GdtCpusCoreType::Efficiency => c"Efficiency",
-        GdtCpusCoreType::Unknown => c"Unknown Core Type",
-    };
+// ---------------------------------------------------------------------------
+// Detection
+// ---------------------------------------------------------------------------
 
-    description.as_ptr()
-}
-
-/// Returns a description of the core type.
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_thread_priority_description(
-    priority: GdtCpusThreadPriority,
-) -> *const c_char {
-    let description = match priority {
-        GdtCpusThreadPriority::Background => c"Background",
-        GdtCpusThreadPriority::Lowest => c"Lowest",
-        GdtCpusThreadPriority::BelowNormal => c"Below Normal",
-        GdtCpusThreadPriority::Normal => c"Normal",
-        GdtCpusThreadPriority::AboveNormal => c"Above Normal",
-        GdtCpusThreadPriority::Highest => c"Highest",
-        GdtCpusThreadPriority::TimeCritical => c"Time Critical",
-    };
-
-    description.as_ptr()
-}
-
-/// Retrieves comprehensive information about the CPU(s) in the system.
-///
-/// This function populates the `out_info` output parameter with a `GdtCpusCpuInfo` struct,
-/// which contains details such as CPU vendor, model name, feature flags, and counts of
-/// various core types (physical, logical, performance, efficiency) and sockets.
-///
-/// The `model_name` and `vendor_name` fields within the `GdtCpusCpuInfo` struct are pointers
-/// to C strings. These strings are managed internally and are guaranteed to be valid for the
-/// lifetime of the program after the first call to this function. Subsequent calls will return
-/// pointers to the same statically allocated strings.
-///
-/// # Arguments
-///
-/// * `out_info`: A mutable pointer to a `GdtCpusCpuInfo` struct where the CPU information will be written.
-///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on failure.
+/// Fills `out_info` with the CPU summary. The C wrapper owns a process-local
+/// snapshot for pointer stability.
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_info` is a valid pointer to a mutable `GdtCpusCpuInfo` memory location.
-/// The memory pointed to by `out_info` must be writable and properly aligned.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_info` must point to a valid `GdtCpusCpuInfo`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_cpu_info(out_info: *mut GdtCpusCpuInfo) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_info);
-
-    let container = CPU_INFO_CONTAINER.get_or_init(|| {
-        let model_name_cstring = CString::new(rust_info.model_name.clone())
-            .unwrap_or_else(|_| CString::new("Unknown").unwrap());
-
-        let vendor_name_cstring = CString::new(format!("{}", rust_info.vendor))
-            .unwrap_or_else(|_| CString::new("Unknown").unwrap());
-
-        CpuInfoContainer {
-            model_name_storage: model_name_cstring,
-            vendor_name_storage: vendor_name_cstring,
-        }
-    });
-
+pub unsafe extern "C" fn gdt_cpus_cpu_info(out_info: *mut GdtCpusCpuInfo) -> i32 {
+    let c = get_info_validate_out_or_err!(out_info);
+    let info = &c.info;
     unsafe {
         *out_info = GdtCpusCpuInfo {
-            vendor: GdtCpusVendor::from(&rust_info.vendor),
-            vendor_name: container.vendor_name_storage.as_ptr(),
-            model_name: container.model_name_storage.as_ptr(),
-            features: rust_info.features.bits() as u32,
-            sockets_count: rust_info.sockets.len() as u64,
-            total_sockets: rust_info.total_sockets as u64,
-            total_physical_cores: rust_info.total_physical_cores as u64,
-            total_logical_processors: rust_info.total_logical_processors as u64,
-            total_performance_cores: rust_info.total_performance_cores as u64,
-            total_efficiency_cores: rust_info.total_efficiency_cores as u64,
+            vendor: info.vendor.into(),
+            vendor_name: c.vendor_name_storage.as_ptr(),
+            model_name: c.model_name_storage.as_ptr(),
+            features: info.features.bits(),
+            lp_count: info.lps.len() as u64,
+            core_count: info.core_count as u64,
+            socket_count: info.socket_count as u64,
+            numa_node_count: info.numa_node_count as u64,
+            l3_domain_count: info.l3_domains.len() as u64,
+            performance_cores: info.num_performance_cores() as u64,
+            efficiency_cores: info.num_efficiency_cores() as u64,
+            lp_efficiency_cores: info.num_lp_efficiency_cores() as u64,
         };
     }
-
     GdtCpusErrorCode::Success as i32
 }
 
-/// Returns the CPU vendor.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_vendor(vendor: *mut GdtCpusVendor) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(vendor);
-
-    unsafe {
-        *vendor = GdtCpusVendor::from(&rust_info.vendor);
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the CPU feature flags as a bitmask.
-///
-/// This function populates the `out_features` output parameter with the CPU feature flags.
-/// The specific meaning of each bit depends on the CPU architecture and is defined by `gdt_cpus::Features`.
-///
-/// # Arguments
-///
-/// * `out_features`: A mutable pointer to a `u32` where the CPU feature flags will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on failure.
+/// Writes `true` if more than one core kind is present.
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_features` is a valid pointer to a mutable `u32` memory location.
-/// The memory pointed to by `out_features` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_is_hybrid` must point to a valid `bool`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_features(out_features: *mut u32) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_features);
-
-    unsafe {
-        *out_features = rust_info.features.bits() as u32;
-    }
-
+pub unsafe extern "C" fn gdt_cpus_is_hybrid(out_is_hybrid: *mut bool) -> i32 {
+    let c = get_info_validate_out_or_err!(out_is_hybrid);
+    unsafe { *out_is_hybrid = c.info.is_hybrid() };
     GdtCpusErrorCode::Success as i32
 }
 
-/// Retrieves the total number of physical CPU cores available on the system.
-///
-/// This function populates the `out_num_physical_cores` output parameter with the count of physical cores.
-///
-/// # Arguments
-///
-/// * `out_num_physical_cores`: A mutable pointer to a `u64` where the total number of physical CPU cores will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on failure.
+/// Fills `out_lp` with the logical-processor record at `index`
+/// (`0..lp_count`, detection order - sorted by OS id).
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_num_physical_cores` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_num_physical_cores` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_lp` must point to a valid `GdtCpusLp`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_num_physical_cores(out_num_physical_cores: *mut u64) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_num_physical_cores);
-
-    unsafe {
-        *out_num_physical_cores = rust_info.total_physical_cores as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the total number of logical CPUs (threads) available on the system.
-///
-/// This function populates the `out_num_logical_cores` output parameter with the count of logical CPUs.
-///
-/// # Arguments
-///
-/// * `out_num_logical_cores`: A mutable pointer to a `u64` where the total number of logical CPUs will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on failure.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_num_logical_cores` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_num_logical_cores` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_num_logical_cores(out_num_logical_cores: *mut u64) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_num_logical_cores);
-
-    unsafe {
-        *out_num_logical_cores = rust_info.total_logical_processors as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the number of logical CPUs (threads) per physical core.
-///
-/// This function assumes a symmetrical multiprocessing (SMP) system where each core has the same number of logical CPUs.
-/// It populates the `out_num_logical_cpus_per_core` output parameter with this count.
-///
-/// # Arguments
-///
-/// * `out_num_logical_cpus_per_core`: A mutable pointer to a `u64` where the number of logical CPUs per core will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::NotSupported` if the system is not SMP or the information cannot be determined reliably for a single value.
-/// * Other error codes from `GdtCpusErrorCode` (as `i32`) on failure.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_num_logical_cpus_per_core` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_num_logical_cpus_per_core` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_num_logical_cpus_per_core(out_num_logical_cpus_per_core: *mut u64) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_num_logical_cpus_per_core);
-
-    let logical_cpus_per_core = rust_info.total_logical_processors / rust_info.total_physical_cores;
-
-    unsafe {
-        *out_num_logical_cpus_per_core = logical_cpus_per_core as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the total number of performance cores (P-cores) available on the system.
-///
-/// This function is typically relevant for hybrid architecture CPUs (e.g., Intel Alder Lake and newer).
-/// It populates the `out_num_performance_cores` output parameter with the count.
-///
-/// # Arguments
-///
-/// * `out_num_performance_cores`: A mutable pointer to a `u64` where the total number of performance cores will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::NotSupported` if the system does not differentiate core types or the count is zero.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_num_performance_cores` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_num_performance_cores` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_num_performance_cores(out_num_performance_cores: *mut u64) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_num_performance_cores);
-
-    unsafe {
-        *out_num_performance_cores = rust_info.total_performance_cores as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the total number of efficiency cores (E-cores) available on the system.
-///
-/// This function is typically relevant for hybrid architecture CPUs (e.g., Intel Alder Lake and newer).
-/// It populates the `out_num_efficiency_cores` output parameter with the count.
-///
-/// # Arguments
-///
-/// * `out_num_efficiency_cores`: A mutable pointer to a `u64` where the total number of efficiency cores will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::NotSupported` if the system does not differentiate core types or the count is zero.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_num_efficiency_cores` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_num_efficiency_cores` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_num_efficiency_cores(out_num_efficiency_cores: *mut u64) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_num_efficiency_cores);
-
-    unsafe {
-        *out_num_efficiency_cores = rust_info.total_efficiency_cores as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Checks if the CPU has a hybrid architecture (e.g., containing both P-cores and E-cores).
-///
-/// This function populates the `out_is_hybrid` output parameter with the result.
-///
-/// # Arguments
-///
-/// * `out_is_hybrid`: A mutable pointer to a `bool` where the result of the hybrid check will be written.
-///   `true` if the CPU is hybrid, `false` otherwise.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful determination.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on failure.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_is_hybrid` is a valid pointer to a mutable `bool` memory location.
-/// The memory pointed to by `out_is_hybrid` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_is_hybrid(out_is_hybrid: *mut bool) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_is_hybrid);
-
-    unsafe {
-        *out_is_hybrid = rust_info.is_hybrid();
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the total number of CPU sockets (physical CPU packages) in the system.
-///
-/// This function populates the `out_num_sockets` output parameter with the count.
-/// For most consumer systems, this will be 1.
-///
-/// # Arguments
-///
-/// * `out_num_sockets`: A mutable pointer to a `u64` where the total number of CPU sockets will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on failure.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_num_sockets` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_num_sockets` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_num_sockets(out_num_sockets: *mut u64) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_num_sockets);
-
-    unsafe {
-        *out_num_sockets = rust_info.sockets.len() as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves detailed information for a specific CPU socket, by its index.
-///
-/// This function populates the `out_socket_info` output parameter with the details of the specified socket.
-/// The socket index must be less than the total number of sockets reported by `gdt_cpus_num_sockets`.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket to query.
-/// * `out_socket_info`: A mutable pointer to a `GdtCpusSocketInfo` struct where the socket information will be written.
-///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_socket_info` is a valid pointer to a mutable `GdtCpusSocketInfo` memory location.
-/// The memory pointed to by `out_socket_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_socket_info(
-    socket_index: u64,
-    out_socket_info: *mut GdtCpusSocketInfo,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_socket_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
+pub unsafe extern "C" fn gdt_cpus_get_lp(index: u64, out_lp: *mut GdtCpusLp) -> i32 {
+    let c = get_info_validate_out_or_err!(out_lp);
+    let Some(lp) = c.info.lps.get(index as usize) else {
+        return GdtCpusErrorCode::OutOfBounds as i32;
     };
-
     unsafe {
-        *out_socket_info = GdtCpusSocketInfo::from(socket);
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the system-specific ID for a CPU socket, by its index.
-///
-/// This function populates the `out_socket_id` output parameter with the ID of the specified socket.
-/// The socket index must be less than the total number of sockets reported by `gdt_cpus_num_sockets`.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket to query.
-/// * `out_socket_id`: A mutable pointer to a `u64` where the socket ID will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_socket_id` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_socket_id` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_socket_id_for_socket(socket_index: u64, out_socket_id: *mut u64) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_socket_id);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_socket_id = socket.id as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Checks if a specific CPU socket has L3 cache information available.
-///
-/// This function populates the `out_has_l3_cache_info` output parameter.
-/// The socket index must be less than the total number of sockets reported by `gdt_cpus_num_sockets`.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket to query.
-/// * `out_has_l3_cache_info`: A mutable pointer to a `bool` where the result will be written.
-///   `true` if L3 cache information is available for the socket, `false` otherwise.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful determination.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_has_l3_cache_info` is a valid pointer to a mutable `bool` memory location.
-/// The memory pointed to by `out_has_l3_cache_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_has_l3_cache_info(
-    socket_index: u64,
-    out_has_l3_cache_info: *mut bool,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_has_l3_cache_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_has_l3_cache_info = socket.l3_cache.is_some();
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves L3 cache information for a specific CPU socket.
-///
-/// This function populates the `out_cache_info` output parameter with the L3 cache details if available.
-/// The socket index must be less than the total number of sockets reported by `gdt_cpus_num_sockets`.
-/// Call `gdt_cpus_has_l3_cache_info` first to check for L3 cache presence.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket to query.
-/// * `out_cache_info`: A mutable pointer to a `GdtCpusCacheInfo` struct where the L3 cache information will be written.
-///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` is invalid.
-/// * `GdtCpusErrorCode::NotApplicable` if the specified socket does not have an L3 cache.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_cache_info` is a valid pointer to a mutable `GdtCpusCacheInfo` memory location.
-/// The memory pointed to by `out_cache_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_l3_cache_info(
-    socket_index: u64,
-    out_cache_info: *mut GdtCpusCacheInfo,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_cache_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_cache_info = if let Some(l3_cache) = &socket.l3_cache {
-            GdtCpusCacheInfo::from(l3_cache)
-        } else {
-            return GdtCpusErrorCode::NotFound as i32;
+        *out_lp = GdtCpusLp {
+            os_id: lp.os_id as u32,
+            core: lp.core as u32,
+            socket: lp.socket as u32,
+            l3_domain: if lp.l3_domain == gdt_cpus::Lp::NO_L3 {
+                GDT_CPUS_NO_L3
+            } else {
+                lp.l3_domain as u32
+            },
+            numa_node: lp.numa_node as u32,
+            kind: lp.kind.into(),
+            smt_index: lp.smt_index as u32,
+            perf_hint: lp.perf_hint as u32,
+            cpu_part: lp.cpu_part as u32,
         };
     }
-
     GdtCpusErrorCode::Success as i32
 }
 
-/// Retrieves the number of physical cores within a specific CPU socket.
-///
-/// This function populates the `out_num_cores` output parameter with the count of physical cores for the given socket.
-/// The socket index must be less than the total number of sockets reported by `gdt_cpus_num_sockets`.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket to query.
-/// * `out_num_cores`: A mutable pointer to a `u64` where the number of cores will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
+/// Fills `out_domain` with the L3 domain at `index` (`0..l3_domain_count`).
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_num_cores` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_num_cores` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_domain` must point to a valid `GdtCpusL3Domain`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_num_cores(socket_index: u64, out_num_cores: *mut u64) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_num_cores);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_num_cores = socket.cores.len() as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves detailed information for a specific core within a socket.
-///
-/// This function populates the `out_core_info` output parameter with details of the specified core.
-/// Both `socket_index` and `core_index` must be valid (i.e., less than the counts returned by
-/// `gdt_cpus_num_sockets` and `gdt_cpus_num_cores` respectively).
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_core_info`: A mutable pointer to a `GdtCpusCoreInfo` struct where the core information will be written.
-///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_core_info` is a valid pointer to a mutable `GdtCpusCoreInfo` memory location.
-/// The memory pointed to by `out_core_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_core_info(
-    socket_index: u64,
-    core_index: u64,
-    out_core_info: *mut GdtCpusCoreInfo,
+pub unsafe extern "C" fn gdt_cpus_get_l3_domain(
+    index: u64,
+    out_domain: *mut GdtCpusL3Domain,
 ) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_core_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
+    let c = get_info_validate_out_or_err!(out_domain);
+    let Some(d) = c.info.l3_domains.get(index as usize) else {
+        return GdtCpusErrorCode::OutOfBounds as i32;
     };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
     unsafe {
-        *out_core_info = GdtCpusCoreInfo::from(core);
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the system-specific ID for a core within a socket.
-///
-/// This function populates the `out_core_id` output parameter with the ID of the specified core.
-/// Both `socket_index` and `core_index` must be valid.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_core_id`: A mutable pointer to a `u64` where the core ID will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_core_id` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_core_id` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_core_id(
-    socket_index: u64,
-    core_index: u64,
-    out_core_id: *mut u64,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_core_id);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_core_id = core.id as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the system-specific ID of the socket to which a specific core belongs.
-///
-/// This function populates the `out_socket_id` output parameter with the ID of the socket containing the specified core.
-/// Both `socket_index` (for selecting the socket to look within) and `core_index` must be valid.
-/// This can be useful to confirm a core's parent socket ID if iterating through cores directly.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket where the core is assumed to be located.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_socket_id`: A mutable pointer to a `u64` where the parent socket ID will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_socket_id` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_socket_id` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_socket_id_for_core(
-    socket_index: u64,
-    core_index: u64,
-    out_socket_id: *mut u64,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_socket_id);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_socket_id = core.socket_id as u64;
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves the type of a specific core (e.g., Performance or Efficiency core).
-///
-/// This function populates the `out_core_type` output parameter with the type of the specified core.
-/// Both `socket_index` and `core_index` must be valid.
-/// This is particularly relevant for hybrid architecture CPUs.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_core_type`: A mutable pointer to a `GdtCpusCoreType` enum where the core type will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * `GdtCpusErrorCode::NotSupported` if core types are not differentiated or identifiable.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_core_type` is a valid pointer to a mutable `GdtCpusCoreType` memory location.
-/// The memory pointed to by `out_core_type` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_core_type(
-    socket_index: u64,
-    core_index: u64,
-    out_core_type: *mut GdtCpusCoreType,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_core_type);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_core_type = GdtCpusCoreType::from(&core.core_type);
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Checks if a specific core has L1 instruction (L1i) cache information available.
-///
-/// This function populates the `out_has_l1i_cache_info` output parameter.
-/// Both `socket_index` and `core_index` must be valid (i.e., less than the counts returned by
-/// `gdt_cpus_num_sockets` and `gdt_cpus_num_cores` respectively).
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_has_l1i_cache_info`: A mutable pointer to a `bool` where the result will be written.
-///   `true` if L1i cache information is available for the core, `false` otherwise.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful determination.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_has_l1i_cache_info` is a valid pointer to a mutable `bool` memory location.
-/// The memory pointed to by `out_has_l1i_cache_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_has_l1i_cache_info(
-    socket_index: u64,
-    core_index: u64,
-    out_has_l1i_cache_info: *mut bool,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_has_l1i_cache_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_has_l1i_cache_info = core.l1_instruction_cache.is_some();
-    }
-
-    GdtCpusErrorCode::Success as i32
-}
-
-/// Retrieves L1 instruction (L1i) cache information for a specific core.
-///
-/// This function populates the `out_cache_info` output parameter with the L1i cache details if available.
-/// Both `socket_index` and `core_index` must be valid.
-/// It's recommended to call `gdt_cpus_has_l1i_cache_info` first to check for L1i cache presence for the core.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_cache_info`: A mutable pointer to a `GdtCpusCacheInfo` struct where the L1i cache information will be written.
-///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * `GdtCpusErrorCode::NotFound` if the specified core does not have an L1i cache.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_cache_info` is a valid pointer to a mutable `GdtCpusCacheInfo` memory location.
-/// The memory pointed to by `out_cache_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_l1i_cache_info(
-    socket_index: u64,
-    core_index: u64,
-    out_cache_info: *mut GdtCpusCacheInfo,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_cache_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_cache_info = if let Some(l1i_cache) = &core.l1_instruction_cache {
-            GdtCpusCacheInfo::from(l1i_cache)
-        } else {
-            return GdtCpusErrorCode::NotFound as i32;
+        *out_domain = GdtCpusL3Domain {
+            size_bytes: d.size_bytes,
+            core_count: d.core_count as u32,
+            lp_count: d.mask.count() as u32,
         };
     }
-
     GdtCpusErrorCode::Success as i32
 }
 
-/// Checks if a specific core has L1 data (L1d) cache information available.
-///
-/// This function populates the `out_has_l1d_cache_info` output parameter.
-/// Both `socket_index` and `core_index` must be valid (i.e., less than the counts returned by
-/// `gdt_cpus_num_sockets` and `gdt_cpus_num_cores` respectively).
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_has_l1d_cache_info`: A mutable pointer to a `bool` where the result will be written.
-///   `true` if L1d cache information is available for the core, `false` otherwise.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful determination.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
+/// Writes the OS id of the `lp_index`-th logical processor (ascending) of L3
+/// domain `domain_index`. Use with `GdtCpusL3Domain::lp_count` to enumerate a
+/// domain's LPs - e.g. to build a per-CCD affinity set.
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_has_l1d_cache_info` is a valid pointer to a mutable `bool` memory location.
-/// The memory pointed to by `out_has_l1d_cache_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_os_id` must point to a valid `u32`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_has_l1d_cache_info(
-    socket_index: u64,
-    core_index: u64,
-    out_has_l1d_cache_info: *mut bool,
+pub unsafe extern "C" fn gdt_cpus_get_l3_domain_lp(
+    domain_index: u64,
+    lp_index: u64,
+    out_os_id: *mut u32,
 ) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_has_l1d_cache_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
+    let c = get_info_validate_out_or_err!(out_os_id);
+    let Some(d) = c.info.l3_domains.get(domain_index as usize) else {
+        return GdtCpusErrorCode::OutOfBounds as i32;
     };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
+    let Some(os_id) = d.mask.iter().nth(lp_index as usize) else {
+        return GdtCpusErrorCode::OutOfBounds as i32;
     };
-
-    unsafe {
-        *out_has_l1d_cache_info = core.l1_data_cache.is_some();
-    }
-
+    unsafe { *out_os_id = os_id as u32 };
     GdtCpusErrorCode::Success as i32
 }
 
-/// Retrieves L1 data (L1d) cache information for a specific core.
-///
-/// This function populates the `out_cache_info` output parameter with the L1d cache details if available.
-/// Both `socket_index` and `core_index` must be valid.
-/// It's recommended to call `gdt_cpus_has_l1d_cache_info` first to check for L1d cache presence for the core.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_cache_info`: A mutable pointer to a `GdtCpusCacheInfo` struct where the L1d cache information will be written.
-///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * `GdtCpusErrorCode::NotFound` if the specified core does not have an L1d cache.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
+/// Fills `out_cache` with the L1 data cache of the given core kind
+/// (`size_bytes == 0` = not detected / kind not present).
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_cache_info` is a valid pointer to a mutable `GdtCpusCacheInfo` memory location.
-/// The memory pointed to by `out_cache_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_cache` must point to a valid `GdtCpusCacheInfo`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_l1d_cache_info(
-    socket_index: u64,
-    core_index: u64,
-    out_cache_info: *mut GdtCpusCacheInfo,
+pub unsafe extern "C" fn gdt_cpus_get_l1d_cache(
+    kind: i32,
+    out_cache: *mut GdtCpusCacheInfo,
 ) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_cache_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
+    let c = get_info_validate_out_or_err!(out_cache);
+    let Some(kind) = core_kind_from_i32(kind) else {
+        return GdtCpusErrorCode::InvalidParameter as i32;
     };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_cache_info = if let Some(l1d_cache) = &core.l1_data_cache {
-            GdtCpusCacheInfo::from(l1d_cache)
-        } else {
-            return GdtCpusErrorCode::NotFound as i32;
-        };
-    }
-
+    unsafe { *out_cache = (&c.info.l1d[kind.index()]).into() };
     GdtCpusErrorCode::Success as i32
 }
 
-/// Checks if a specific core has L2 cache information available.
-///
-/// This function populates the `out_has_l2_cache_info` output parameter.
-/// Both `socket_index` and `core_index` must be valid (i.e., less than the counts returned by
-/// `gdt_cpus_num_sockets` and `gdt_cpus_num_cores` respectively).
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_has_l2_cache_info`: A mutable pointer to a `bool` where the result will be written.
-///   `true` if L2 cache information is available for the core, `false` otherwise.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful determination.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
+/// Fills `out_cache` with the L1 instruction cache of the given core kind.
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_has_l2_cache_info` is a valid pointer to a mutable `bool` memory location.
-/// The memory pointed to by `out_has_l2_cache_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_cache` must point to a valid `GdtCpusCacheInfo`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_has_l2_cache_info(
-    socket_index: u64,
-    core_index: u64,
-    out_has_l2_cache_info: *mut bool,
+pub unsafe extern "C" fn gdt_cpus_get_l1i_cache(
+    kind: i32,
+    out_cache: *mut GdtCpusCacheInfo,
 ) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_has_l2_cache_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
+    let c = get_info_validate_out_or_err!(out_cache);
+    let Some(kind) = core_kind_from_i32(kind) else {
+        return GdtCpusErrorCode::InvalidParameter as i32;
     };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_has_l2_cache_info = core.l2_cache.is_some();
-    }
-
+    unsafe { *out_cache = (&c.info.l1i[kind.index()]).into() };
     GdtCpusErrorCode::Success as i32
 }
 
-/// Retrieves L2 cache information for a specific core.
-///
-/// This function populates the `out_cache_info` output parameter with the L2 cache details if available.
-/// Both `socket_index` and `core_index` must be valid.
-/// It's recommended to call `gdt_cpus_has_l2_cache_info` first to check for L2 cache presence for the core.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_cache_info`: A mutable pointer to a `GdtCpusCacheInfo` struct where the L2 cache information will be written.
-///   The data stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * `GdtCpusErrorCode::NotFound` if the specified core does not have an L2 cache.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
+/// Fills `out_cache` with the L2 cache of the given core kind.
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_cache_info` is a valid pointer to a mutable `GdtCpusCacheInfo` memory location.
-/// The memory pointed to by `out_cache_info` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_cache` must point to a valid `GdtCpusCacheInfo`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_l2_cache_info(
-    socket_index: u64,
-    core_index: u64,
-    out_cache_info: *mut GdtCpusCacheInfo,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_cache_info);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
+pub unsafe extern "C" fn gdt_cpus_get_l2_cache(kind: i32, out_cache: *mut GdtCpusCacheInfo) -> i32 {
+    let c = get_info_validate_out_or_err!(out_cache);
+    let Some(kind) = core_kind_from_i32(kind) else {
+        return GdtCpusErrorCode::InvalidParameter as i32;
     };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_cache_info = if let Some(l2_cache) = &core.l2_cache {
-            GdtCpusCacheInfo::from(l2_cache)
-        } else {
-            return GdtCpusErrorCode::NotFound as i32;
-        };
-    }
-
+    unsafe { *out_cache = (&c.info.l2[kind.index()]).into() };
     GdtCpusErrorCode::Success as i32
 }
 
-/// Retrieves the number of logical processor IDs associated with a specific physical core.
-///
-/// This function populates the `out_num_logical_ids` output parameter with the count.
-/// This typically corresponds to the number of hardware threads (e.g., via Hyper-Threading or SMT) for that core.
-/// Both `socket_index` and `core_index` must be valid.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `out_num_logical_ids`: A mutable pointer to a `u64` where the number of logical processor IDs will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index` or `core_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
+/// Writes the number of physical cores of the given kind.
 ///
 /// # Safety
-///
-/// The caller must ensure that `out_num_logical_ids` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_num_logical_ids` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// `out_count` must point to a valid `u64`.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_num_logical_processor_ids(
-    socket_index: u64,
-    core_index: u64,
-    out_num_logical_ids: *mut u64,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_num_logical_ids);
-
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
+pub unsafe extern "C" fn gdt_cpus_num_cores_of_kind(kind: i32, out_count: *mut u64) -> i32 {
+    let c = get_info_validate_out_or_err!(out_count);
+    let Some(kind) = core_kind_from_i32(kind) else {
+        return GdtCpusErrorCode::InvalidParameter as i32;
     };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
     unsafe {
-        *out_num_logical_ids = core.logical_processor_ids.len() as u64;
+        *out_count = c.info.kind_core_counts[kind.index()] as u64;
     }
-
     GdtCpusErrorCode::Success as i32
 }
 
-/// Retrieves a specific logical processor ID for a given physical core.
-///
-/// This function populates the `out_logical_id` output parameter with the system-specific ID of a logical processor (thread).
-/// `socket_index`, `core_index`, and `logical_processor_index` must all be valid.
-/// The `logical_processor_index` should be less than the count returned by `gdt_cpus_num_logical_processor_ids` for that core.
-///
-/// # Arguments
-///
-/// * `socket_index`: The 0-based index of the CPU socket.
-/// * `core_index`: The 0-based index of the core within the specified socket.
-/// * `logical_processor_index`: The 0-based index of the logical processor within the specified core.
-/// * `out_logical_id`: A mutable pointer to a `u64` where the logical processor ID will be written.
-///   The value stored is only valid if the function returns `GdtCpusErrorCode::Success`.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) on successful retrieval.
-/// * `GdtCpusErrorCode::OutOfBounds` if `socket_index`, `core_index`, or `logical_processor_index` is invalid.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Safety
-///
-/// The caller must ensure that `out_logical_id` is a valid pointer to a mutable `u64` memory location.
-/// The memory pointed to by `out_logical_id` must be writable.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_get_logical_processor_id(
-    socket_index: u64,
-    core_index: u64,
-    logical_processor_index: u64,
-    out_logical_id: *mut u64,
-) -> i32 {
-    let rust_info = get_info_validate_out_or_err!(out_logical_id);
+// ---------------------------------------------------------------------------
+// Thread control
+// ---------------------------------------------------------------------------
 
-    let socket = match rust_info.sockets.get(socket_index as usize) {
-        Some(socket) => socket,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    let core = match socket.cores.get(core_index as usize) {
-        Some(core) => core,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    let core_logical_processor_id = match core
-        .logical_processor_ids
-        .get(logical_processor_index as usize)
-    {
-        Some(id) => id,
-        None => return GdtCpusErrorCode::OutOfBounds as i32,
-    };
-
-    unsafe {
-        *out_logical_id = *core_logical_processor_id as u64;
+fn mask_from_ffi(lp_ids: *const u32, count: u64) -> Result<AffinityMask, GdtCpusErrorCode> {
+    if lp_ids.is_null() || count == 0 {
+        return Err(GdtCpusErrorCode::InvalidParameter);
     }
-
-    GdtCpusErrorCode::Success as i32
+    let ids = unsafe { std::slice::from_raw_parts(lp_ids, count as usize) };
+    let mut mask = AffinityMask::empty();
+    for &id in ids {
+        // Reject out-of-range ids explicitly: AffinityMask caps at
+        // MAX_LP_COUNT, so a bogus id is a clean InvalidParameter rather than a
+        // silently dropped core (and never an allocation - the mask is fixed).
+        if id as usize >= AffinityMask::MAX_LP_COUNT {
+            return Err(GdtCpusErrorCode::InvalidParameter);
+        }
+        mask.add(id as usize);
+    }
+    Ok(mask)
 }
 
-/// Pins the current thread to a specific logical core (hardware thread).
+/// Pins the current thread to a single logical processor (OS LP id).
 ///
-/// This function attempts to set the affinity of the calling thread to the specified logical core ID.
-/// The `logical_core_id` should be a valid ID obtained from functions like `gdt_cpus_get_logical_processor_id`.
-/// Pinning a thread can be useful for performance-critical tasks to ensure a thread runs on a specific core,
-/// potentially improving cache utilization and reducing context switching.
-///
-/// # Arguments
-///
-/// * `logical_core_id`: The system-specific ID of the logical core to pin the current thread to.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) if the thread was successfully pinned.
-/// * `GdtCpusErrorCode::InvalidParameter` if `logical_core_id` is invalid or out of range for the system.
-/// * `GdtCpusErrorCode::NotSupported` if thread pinning is not supported on the current platform.
-/// * `GdtCpusErrorCode::OsError` if an underlying OS-level error occurred.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Notes
-///
-/// - The behavior and success of thread pinning can be platform-dependent.
-/// - Incorrectly pinning threads can sometimes lead to performance degradation, so use with understanding.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// macOS: returns `Unsupported` - Apple Silicon ignores affinity; use
+/// `gdt_cpus_set_thread_priority` (QoS) for placement there.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_pin_thread_to_core(logical_core_id: u64) -> i32 {
+pub extern "C" fn gdt_cpus_pin_thread_to_core(logical_core_id: u64) -> i32 {
     match gdt_cpus::pin_thread_to_core(logical_core_id as usize) {
         Ok(_) => GdtCpusErrorCode::Success as i32,
-        Err(err) => GdtCpusErrorCode::from(&err) as i32,
+        Err(e) => GdtCpusErrorCode::from(&e) as i32,
     }
 }
 
-/// Sets the priority of the current thread.
+/// Sets the current thread's HARD affinity to the given OS LP ids.
 ///
-/// This function attempts to change the scheduling priority of the calling thread.
-/// The `priority` argument should be one of the values from the `GdtCpusThreadPriority` enum.
-/// Setting thread priority can influence how the operating system schedules the thread relative to others.
+/// Windows: the set must stay within one 64-LP processor group (OS rule);
+/// use soft affinity for cross-group placement. macOS: `Unsupported`.
 ///
-/// # Arguments
-///
-/// * `priority`: A `GdtCpusThreadPriority` enum value specifying the desired priority level.
-///
-/// # Returns
-///
-/// * `GdtCpusErrorCode::Success` (0) if the thread priority was successfully set.
-/// * `GdtCpusErrorCode::InvalidParameter` if the `priority` value is not a valid member of `GdtCpusThreadPriority`.
-/// * `GdtCpusErrorCode::NotSupported` if setting thread priority is not supported or the requested level is not available on the current platform.
-/// * `GdtCpusErrorCode::PermissionDenied` if the caller does not have sufficient privileges to change the thread priority.
-/// * `GdtCpusErrorCode::OsError` if an underlying OS-level error occurred.
-/// * An error code from `GdtCpusErrorCode` (as `i32`) on other failures.
-///
-/// # Notes
-///
-/// - The interpretation and effect of thread priorities are highly platform-dependent.
-/// - Setting very high priorities might require special privileges and can potentially starve other system processes if not used carefully.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// # Safety
+/// `lp_ids` must point to `count` valid `u32` values.
 #[unsafe(no_mangle)]
-extern "C" fn gdt_cpus_set_thread_priority(priority: GdtCpusThreadPriority) -> i32 {
-    match gdt_cpus::set_thread_priority(priority.into()) {
+pub unsafe extern "C" fn gdt_cpus_set_thread_affinity(lp_ids: *const u32, count: u64) -> i32 {
+    let mask = match mask_from_ffi(lp_ids, count) {
+        Ok(m) => m,
+        Err(code) => return code as i32,
+    };
+    match gdt_cpus::set_thread_affinity(&mask) {
         Ok(_) => GdtCpusErrorCode::Success as i32,
-        Err(err) => GdtCpusErrorCode::from(&err) as i32,
+        Err(e) => GdtCpusErrorCode::from(&e) as i32,
+    }
+}
+
+/// Sets the current thread's SOFT affinity (Windows CPU Sets) to the given
+/// OS LP ids - the scheduler PREFERS these LPs but may migrate under
+/// contention. Returns `Unsupported` on every other platform.
+///
+/// # Safety
+/// `lp_ids` must point to `count` valid `u32` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdt_cpus_set_thread_soft_affinity(lp_ids: *const u32, count: u64) -> i32 {
+    let mask = match mask_from_ffi(lp_ids, count) {
+        Ok(m) => m,
+        Err(code) => return code as i32,
+    };
+    match gdt_cpus::set_thread_soft_affinity(&mask) {
+        Ok(_) => GdtCpusErrorCode::Success as i32,
+        Err(e) => GdtCpusErrorCode::from(&e) as i32,
+    }
+}
+
+/// Sets the current thread's priority, reporting what actually stuck.
+///
+/// `out_applied` is optional (may be NULL): pass it to learn whether the request
+/// got a clean grant or silently fell back (see [`GdtCpusAppliedPriority`]). The
+/// return code is `Success` whenever the OS accepted *something* - the fallback
+/// detail lives in `out_applied->reason`, NOT the return code, so an audio thread
+/// that needs to know it landed on `Normal` must read the out-param.
+///
+/// # Safety
+/// `out_applied`, if non-NULL, must point to a valid `GdtCpusAppliedPriority`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdt_cpus_set_thread_priority(
+    priority: i32,
+    out_applied: *mut GdtCpusAppliedPriority,
+) -> i32 {
+    let Some(priority) = thread_priority_from_i32(priority) else {
+        return GdtCpusErrorCode::InvalidParameter as i32;
+    };
+    match gdt_cpus::set_thread_priority(priority) {
+        Ok(applied) => {
+            if !out_applied.is_null() {
+                unsafe { *out_applied = GdtCpusAppliedPriority::from(&applied) };
+            }
+            GdtCpusErrorCode::Success as i32
+        }
+        Err(e) => GdtCpusErrorCode::from(&e) as i32,
+    }
+}
+
+/// Promotes the current thread to real-time with an explicit CPU budget - the
+/// consent API. `out_applied` reports whether the request reached real-time or
+/// kept the current timeshare priority with a structured fallback reason.
+///
+/// `budget_us` is the longest stretch (microseconds) the thread promises to
+/// compute between blocking calls; Linux uses it for the `RLIMIT_RTTIME` leash
+/// (ignored on Windows/macOS). `out_applied` is optional.
+///
+/// # Safety
+/// `out_applied`, if non-NULL, must point to a valid `GdtCpusAppliedPriority`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdt_cpus_promote_thread_to_realtime(
+    budget_us: u64,
+    out_applied: *mut GdtCpusAppliedPriority,
+) -> i32 {
+    match gdt_cpus::promote_thread_to_realtime(std::time::Duration::from_micros(budget_us)) {
+        Ok(applied) => {
+            if !out_applied.is_null() {
+                unsafe { *out_applied = GdtCpusAppliedPriority::from(&applied) };
+            }
+            GdtCpusErrorCode::Success as i32
+        }
+        Err(e) => GdtCpusErrorCode::from(&e) as i32,
+    }
+}
+
+/// Demotes the current thread out of real-time, back to normal scheduling.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdt_cpus_demote_thread_from_realtime() -> i32 {
+    match gdt_cpus::demote_thread_from_realtime() {
+        Ok(()) => GdtCpusErrorCode::Success as i32,
+        Err(e) => GdtCpusErrorCode::from(&e) as i32,
+    }
+}
+
+/// Fills `out_caps` with what each priority level will resolve to on this box.
+/// Touches no thread state; a cheap startup pre-flight (see
+/// [`GdtCpusPriorityCaps`]).
+///
+/// # Safety
+/// `out_caps` must point to a valid `GdtCpusPriorityCaps`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdt_cpus_priority_capabilities(out_caps: *mut GdtCpusPriorityCaps) -> i32 {
+    if out_caps.is_null() {
+        return GdtCpusErrorCode::InvalidParameter as i32;
+    }
+    let caps = gdt_cpus::priority_capabilities();
+    unsafe {
+        *out_caps = GdtCpusPriorityCaps {
+            effective_rank: caps.effective_rank,
+            distinct_levels: caps.distinct_levels(),
+        };
+    }
+    GdtCpusErrorCode::Success as i32
+}
+
+/// Returns a static, null-terminated name for a grant tier.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdt_cpus_grant_description(grant: i32) -> *const c_char {
+    let Some(grant) = grant_from_i32(grant) else {
+        return std::ptr::null();
+    };
+    let s: &'static [u8] = match grant {
+        GdtCpusGrant::Direct => b"direct\0",
+        GdtCpusGrant::Brokered => b"brokered\0",
+        GdtCpusGrant::Realtime => b"realtime\0",
+    };
+    s.as_ptr() as *const c_char
+}
+
+/// Returns a static, null-terminated description of a fallback reason.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdt_cpus_fallback_reason_description(reason: i32) -> *const c_char {
+    let Some(reason) = fallback_reason_from_i32(reason) else {
+        return std::ptr::null();
+    };
+    let s: &'static [u8] = match reason {
+        GdtCpusFallbackReason::None => b"clean grant\0",
+        GdtCpusFallbackReason::NoBroker => b"no broker\0",
+        GdtCpusFallbackReason::BrokerTimedOut => b"broker timed out\0",
+        GdtCpusFallbackReason::BrokerRefused => b"broker refused\0",
+        GdtCpusFallbackReason::Clamped => b"clamped to broker ceiling\0",
+    };
+    s.as_ptr() as *const c_char
+}
+
+/// Returns a static, null-terminated description of a broker-refusal reason.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdt_cpus_broker_error_description(broker_error: i32) -> *const c_char {
+    let Some(broker_error) = broker_error_from_i32(broker_error) else {
+        return std::ptr::null();
+    };
+    let s: &'static [u8] = match broker_error {
+        GdtCpusBrokerError::None => b"none\0",
+        GdtCpusBrokerError::AccessDenied => b"access denied\0",
+        GdtCpusBrokerError::LimitsExceeded => b"limits exceeded\0",
+        GdtCpusBrokerError::InvalidArgs => b"invalid args\0",
+        GdtCpusBrokerError::Failed => b"failed\0",
+        GdtCpusBrokerError::Other => b"other\0",
+    };
+    s.as_ptr() as *const c_char
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ffi_rejects_null_out_pointers() {
+        assert_eq!(
+            unsafe { gdt_cpus_cpu_info(std::ptr::null_mut()) },
+            GdtCpusErrorCode::InvalidParameter as i32
+        );
+        assert_eq!(
+            unsafe { gdt_cpus_get_lp(0, std::ptr::null_mut()) },
+            GdtCpusErrorCode::InvalidParameter as i32
+        );
+        assert_eq!(
+            unsafe { gdt_cpus_priority_capabilities(std::ptr::null_mut()) },
+            GdtCpusErrorCode::InvalidParameter as i32
+        );
+    }
+
+    #[test]
+    fn ffi_rejects_invalid_priority_value() {
+        assert_eq!(
+            unsafe { gdt_cpus_set_thread_priority(99, std::ptr::null_mut()) },
+            GdtCpusErrorCode::InvalidParameter as i32
+        );
+    }
+
+    #[test]
+    fn ffi_cpu_info_smoke() {
+        let mut info: GdtCpusCpuInfo = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { gdt_cpus_cpu_info(&mut info) },
+            GdtCpusErrorCode::Success as i32
+        );
+        assert!(info.lp_count > 0);
+        assert!(info.core_count > 0);
+        assert!(!info.model_name.is_null());
+    }
+
+    #[test]
+    fn applied_priority_conversion_preserves_structured_fields() {
+        let applied = gdt_cpus::AppliedPriority::from_parts(
+            gdt_cpus::ThreadPriority::TimeCritical,
+            gdt_cpus::ThreadPriority::TimeCritical,
+            gdt_cpus::Grant::Brokered,
+            Some(gdt_cpus::FallbackReason::Clamped),
+            gdt_cpus::Mechanism {
+                policy: gdt_cpus::MechanismPolicy::Nice,
+                value: -15,
+            },
+            None,
+        )
+        .unwrap();
+
+        let ffi = GdtCpusAppliedPriority::from(&applied);
+        assert_eq!(
+            ffi.requested as i32,
+            GdtCpusThreadPriority::TimeCritical as i32
+        );
+        assert_eq!(
+            ffi.effective as i32,
+            GdtCpusThreadPriority::TimeCritical as i32
+        );
+        assert_eq!(ffi.grant as i32, GdtCpusGrant::Brokered as i32);
+        assert_eq!(ffi.reason as i32, GdtCpusFallbackReason::Clamped as i32);
+        assert_eq!(ffi.broker_error as i32, GdtCpusBrokerError::None as i32);
+        assert_eq!(
+            ffi.mechanism.policy as i32,
+            GdtCpusMechanismPolicy::Nice as i32
+        );
+        assert_eq!(ffi.mechanism.value, -15);
     }
 }

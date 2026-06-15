@@ -4,44 +4,40 @@
 //! `sysctlbyname` libc function. These utilities are used to retrieve various
 //! CPU-related parameters like hardware model, core counts, cache sizes, etc.
 
-use log::debug;
-
 use crate::{Error, Result};
 
-/// Retrieves an integer value from `sysctlbyname`.
+/// Retrieves an integer value from `sysctlbyname`, tolerant of the key's width.
 ///
-/// This is a generic helper function to call `libc::sysctlbyname` for various integer types
-/// that implement `Default` and `Copy` (e.g., `i32`, `u32`, `u64`, `usize`).
-///
-/// # Type Parameters
-///
-/// * `T`: The integer type to retrieve. Must implement `Default` and `Copy`.
-///
-/// # Arguments
-///
-/// * `name`: The name of the `sysctl` MIB entry (e.g., "hw.ncpu").
+/// NOTE(macos): sysctl integer keys are NOT uniformly sized - the
+/// `hw.perflevelN.*` keys are 4-byte `CTLTYPE_INT` while legacy `hw.*` keys
+/// are often 8-byte QUADs. `sysctlbyname` succeeds whenever the buffer is
+/// large enough and reports the value's ACTUAL size, so a strict
+/// `size == size_of::<T>()` check silently zeroes every key whose kernel
+/// width differs from the requested type. Read into an 8-byte buffer,
+/// accept 4 or 8, zero-extend.
 ///
 /// # Returns
 ///
 /// A `Result<T>` containing the integer value if successful, or an `Error` if:
 /// - The `name` is an invalid C string (`Error::Detection`).
 /// - `sysctlbyname` fails for reasons other than `ENOENT` (`Error::SystemCall`).
-/// - The `sysctl` key specified by `name` is not found (`ENOENT`), resulting in `Error::Detection`.
-///   (This can be handled by the caller using `.ok()` or `.unwrap_or_default()` if the key is optional).
-/// - The size of the data returned by `sysctlbyname` does not match `std::mem::size_of::<T>()`
+/// - The key is not found (`ENOENT` -> `Error::Detection`; callers treat
+///   optional keys with `.ok()` / `.unwrap_or…`).
+/// - The reported size is neither 4 nor 8, or the value does not fit in `T`
 ///   (`Error::Detection`).
-pub(crate) fn sysctlbyname_int<T: Default + Copy>(name: &str) -> Result<T> {
+pub(crate) fn sysctlbyname_int<T: TryFrom<u64>>(name: &str) -> Result<T> {
     use std::ffi::CString;
 
     let c_name = CString::new(name)
         .map_err(|e| Error::Detection(format!("Invalid sysctl name {}: {}", name, e)))?;
-    let mut value: T = T::default();
-    let mut size = std::mem::size_of::<T>();
+
+    let mut raw: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
 
     let ret = unsafe {
         libc::sysctlbyname(
             c_name.as_ptr(),
-            &mut value as *mut _ as *mut libc::c_void,
+            &mut raw as *mut _ as *mut libc::c_void,
             &mut size,
             std::ptr::null_mut(),
             0,
@@ -49,28 +45,36 @@ pub(crate) fn sysctlbyname_int<T: Default + Copy>(name: &str) -> Result<T> {
     };
 
     if ret == -1 {
-        // Check if the error is ENOENT (No such file or directory)
         let os_err = std::io::Error::last_os_error();
+
         if os_err.raw_os_error() == Some(libc::ENOENT) {
-            debug!("Sysctl key {} not found (ENOENT)", name);
-            // For optional keys, we might want to return Ok(T::default()) or a specific error.
-            // For now, let's make it an error that can be handled with .ok() or .unwrap_or_default()
             return Err(Error::Detection(format!("Sysctl key {} not found", name)));
         }
-        Err(Error::SystemCall(format!(
+
+        return Err(Error::SystemCall(format!(
             "sysctlbyname for {} failed: {}",
             name, os_err
-        )))
-    } else if size != std::mem::size_of::<T>() {
-        Err(Error::Detection(format!(
-            "sysctlbyname for {} returned unexpected size: {} - should be {}",
-            name,
-            size,
-            std::mem::size_of::<T>()
-        )))
-    } else {
-        Ok(value)
+        )));
     }
+
+    // aarch64 is little-endian: a 4-byte value occupies the low bytes of `raw`.
+    let value: u64 = match size {
+        4 => raw & 0xFFFF_FFFF,
+        8 => raw,
+        n => {
+            return Err(Error::Detection(format!(
+                "sysctlbyname for {} returned unexpected size: {} (expected 4 or 8)",
+                name, n
+            )));
+        }
+    };
+
+    T::try_from(value).map_err(|_| {
+        Error::Detection(format!(
+            "sysctl {} value {} does not fit the requested integer type",
+            name, value
+        ))
+    })
 }
 
 /// Retrieves a string value from `sysctlbyname`.
@@ -97,6 +101,7 @@ pub(crate) fn sysctlbyname_string(name: &str) -> Result<String> {
 
     let c_name = CString::new(name)
         .map_err(|e| Error::Detection(format!("Invalid sysctl name {}: {}", name, e)))?;
+
     let mut size: libc::size_t = 0;
 
     let ret = unsafe {
@@ -111,10 +116,11 @@ pub(crate) fn sysctlbyname_string(name: &str) -> Result<String> {
 
     if ret == -1 {
         let os_err = std::io::Error::last_os_error();
+
         if os_err.raw_os_error() == Some(libc::ENOENT) {
-            debug!("Sysctl key {} not found (ENOENT)", name);
             return Err(Error::Detection(format!("Sysctl key {} not found", name)));
         }
+
         return Err(Error::SystemCall(format!(
             "sysctlbyname for {} (size query) failed: {}",
             name, os_err
@@ -126,6 +132,7 @@ pub(crate) fn sysctlbyname_string(name: &str) -> Result<String> {
     }
 
     let mut buf = vec![0u8; size as usize];
+
     let ret = unsafe {
         libc::sysctlbyname(
             c_name.as_ptr(),
@@ -151,16 +158,4 @@ pub(crate) fn sysctlbyname_string(name: &str) -> Result<String> {
 
     String::from_utf8(buf)
         .map_err(|e| Error::Detection(format!("UTF-8 conversion error for {}: {}", name, e)))
-}
-
-/// Converts a `u32` value to a `libc::qos_class_t`.
-pub(crate) fn u32_to_qos_class_t(value: u32) -> libc::qos_class_t {
-    match value {
-        0x21 => libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
-        0x19 => libc::qos_class_t::QOS_CLASS_USER_INITIATED,
-        0x15 => libc::qos_class_t::QOS_CLASS_DEFAULT,
-        0x11 => libc::qos_class_t::QOS_CLASS_UTILITY,
-        0x09 => libc::qos_class_t::QOS_CLASS_BACKGROUND,
-        _ => libc::qos_class_t::QOS_CLASS_UNSPECIFIED,
-    }
 }

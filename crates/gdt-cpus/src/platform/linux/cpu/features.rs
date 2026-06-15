@@ -52,6 +52,10 @@ pub(crate) fn detect_features_from_hashmap(
     }
     if cpu_features_from_proc_cpuinfo.contains("sse4_2") {
         features.insert(CpuFeatures::SSE4_2);
+        // NOTE(x86): the CRC32 instructions ARE part of SSE4.2 - there is no
+        // separate cpuinfo flag on x86 ("crc32" is the ARM flag name), so
+        // CRC32 must be set here or it is never set on x86 at all.
+        features.insert(CpuFeatures::CRC32);
     }
     if cpu_features_from_proc_cpuinfo.contains("fma") {
         features.insert(CpuFeatures::FMA3);
@@ -85,6 +89,18 @@ pub(crate) fn detect_features_from_hashmap(
     }
     if cpu_features_from_proc_cpuinfo.contains("crc32") {
         features.insert(CpuFeatures::CRC32);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("popcnt") {
+        features.insert(CpuFeatures::POPCNT);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("bmi1") {
+        features.insert(CpuFeatures::BMI1);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("bmi2") {
+        features.insert(CpuFeatures::BMI2);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("f16c") {
+        features.insert(CpuFeatures::F16C);
     }
 }
 
@@ -126,6 +142,77 @@ pub(crate) fn detect_features_from_hashmap(
     }
     if cpu_features_from_proc_cpuinfo.contains("sve") {
         features.insert(CpuFeatures::SVE);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("fphp")
+        || cpu_features_from_proc_cpuinfo.contains("asimdhp")
+    {
+        features.insert(CpuFeatures::FP16);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("asimddp") {
+        features.insert(CpuFeatures::DOTPROD);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("i8mm") {
+        features.insert(CpuFeatures::I8MM);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("bf16") {
+        features.insert(CpuFeatures::BF16);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("sve2") {
+        features.insert(CpuFeatures::SVE2);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("atomics") {
+        features.insert(CpuFeatures::LSE);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("jscvt") {
+        features.insert(CpuFeatures::JSCVT);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("lrcpc") {
+        features.insert(CpuFeatures::LRCPC);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("pmull") {
+        features.insert(CpuFeatures::PMULL);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("asimdrdm") {
+        features.insert(CpuFeatures::RDM);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("asimdfhm") {
+        features.insert(CpuFeatures::FHM);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("fcma") {
+        features.insert(CpuFeatures::FCMA);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("lse2") {
+        features.insert(CpuFeatures::LSE2);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("ilrcpc") {
+        features.insert(CpuFeatures::LRCPC2);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("sm3") {
+        features.insert(CpuFeatures::SM3);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("sm4") {
+        features.insert(CpuFeatures::SM4);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("sveaes") {
+        features.insert(CpuFeatures::SVEAES);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("svepmull") {
+        features.insert(CpuFeatures::SVEPMULL);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("svebitperm") {
+        features.insert(CpuFeatures::SVEBITPERM);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("svesha3") {
+        features.insert(CpuFeatures::SVESHA3);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("svesm4") {
+        features.insert(CpuFeatures::SVESM4);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("svei8mm") {
+        features.insert(CpuFeatures::SVEI8MM);
+    }
+    if cpu_features_from_proc_cpuinfo.contains("svebf16") {
+        features.insert(CpuFeatures::SVEBF16);
     }
 }
 

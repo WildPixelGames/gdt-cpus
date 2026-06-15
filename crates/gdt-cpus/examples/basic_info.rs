@@ -1,13 +1,9 @@
 //! Example that displays basic CPU information.
 
-fn main() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Info)
-        .init();
+use gdt_cpus::{CoreKind, CpuInfo};
 
-    // Get CPU information
-    let info = match gdt_cpus::cpu_info() {
+fn main() {
+    let info = match CpuInfo::detect() {
         Ok(info) => info,
         Err(e) => {
             eprintln!("Error retrieving CPU information: {}", e);
@@ -19,49 +15,69 @@ fn main() {
     println!("---------------");
     println!("Vendor: {}", info.vendor);
     println!("Model: {}", info.model_name);
-    println!("Physical cores: {}", info.total_physical_cores);
-    println!("Logical cores: {}", info.total_logical_processors);
-    println!("Performance cores: {}", info.total_performance_cores);
-    println!("Efficiency cores: {}", info.total_efficiency_cores);
+    println!("Sockets: {}", info.socket_count);
+    println!("Physical cores: {}", info.num_physical_cores());
+    println!("Logical cores: {}", info.num_logical_cores());
+    println!("Performance cores: {}", info.num_performance_cores());
+    println!("Efficiency cores: {}", info.num_efficiency_cores());
+    println!("LP-Efficiency cores: {}", info.num_lp_efficiency_cores());
+    println!("NUMA nodes: {}", info.numa_node_count);
     println!(
         "Hybrid architecture: {}",
         if info.is_hybrid() { "Yes" } else { "No" }
     );
 
-    // Print more detailed information about each processor/socket
-    for (i, socket) in info.sockets.iter().enumerate() {
-        println!("\nProcessor #{} (Socket ID: {})", i, socket.id);
-
-        // Print cache information if available
-        if let Some(ref l3) = socket.l3_cache {
-            println!("  L3 Cache: {} KB", l3.size_bytes / 1024);
-        }
-
-        // Print information about each core
-        println!("  Cores:");
-        for core in &socket.cores {
-            println!(
-                "    Core #{}: {} core with {} threads",
-                core.id,
-                core.core_type,
-                core.logical_processor_ids.len()
-            );
-
-            // Print cache information if available
-            if let Some(ref l1i) = core.l1_instruction_cache {
-                println!("      L1i Cache: {} KB", l1i.size_bytes / 1024);
-            }
-            if let Some(ref l1d) = core.l1_data_cache {
-                println!("      L1d Cache: {} KB", l1d.size_bytes / 1024);
-            }
-            if let Some(ref l2) = core.l2_cache {
-                println!("      L2 Cache: {} KB", l2.size_bytes / 1024);
-            }
-        }
+    println!("\nL3 domains: {}", info.l3_domains.len());
+    for (i, d) in info.l3_domains.iter().enumerate() {
+        println!(
+            "  domain {}: {} MiB, {} cores, {} threads",
+            i,
+            d.size_bytes / (1024 * 1024),
+            d.core_count,
+            d.mask.count()
+        );
     }
 
-    // Print CPU features
-    println!("\nCPU Features:",);
+    println!("\nPer-kind caches:");
+    for kind in [
+        CoreKind::Performance,
+        CoreKind::Efficiency,
+        CoreKind::LpEfficiency,
+    ] {
+        let k = kind.index();
+        if info.kind_core_counts[k] == 0 {
+            continue;
+        }
+        println!(
+            "  {}: L1d {} KB / L1i {} KB / L2 {} KB (L2 shared by {} threads)",
+            kind,
+            info.l1d[k].size_bytes / 1024,
+            info.l1i[k].size_bytes / 1024,
+            info.l2[k].size_bytes / 1024,
+            info.l2[k].shared_by,
+        );
+    }
+
+    println!("\nLogical processors:");
+    for lp in &info.lps {
+        println!(
+            "  lp {:>3}: core {:>3} smt {} socket {} l3-domain {} numa {} perf {:>4} kind {}",
+            lp.os_id,
+            lp.core,
+            lp.smt_index,
+            lp.socket,
+            if lp.l3_domain == gdt_cpus::Lp::NO_L3 {
+                "-".to_string()
+            } else {
+                lp.l3_domain.to_string()
+            },
+            lp.numa_node,
+            lp.perf_hint,
+            lp.kind,
+        );
+    }
+
+    println!("\nCPU Features:");
     println!(
         "  {}",
         info.features

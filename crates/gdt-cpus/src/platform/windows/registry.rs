@@ -108,7 +108,7 @@ fn read_registry_string_value(hkey: HKEY, value_name: &str) -> WinResult<String>
     }
 
     // Buffer size must be even for UTF-16 data.
-    if buffer_size_bytes % 2 != 0 {
+    if !buffer_size_bytes.is_multiple_of(2) {
         return Err(WinError::new(
             windows::Win32::Foundation::E_INVALIDARG,
             "Registry value (REG_SZ) size in bytes is not an even number.",
@@ -118,13 +118,15 @@ fn read_registry_string_value(hkey: HKEY, value_name: &str) -> WinResult<String>
     // Prepare a buffer for the data (number of u16 elements).
     // `buffer_size_bytes` includes the size of the data AND the null terminator.
     let num_u16_elements = (buffer_size_bytes / 2) as usize;
+
     let mut buffer_u16: Vec<u16> = vec![0u16; num_u16_elements];
 
     // Step 2: Retrieve the actual data.
+    let mut actual_bytes_written = buffer_size_bytes; // Pass the allocated buffer size
+
     // SAFETY: Calling Windows API. `buffer_u16.as_mut_ptr()` is a valid pointer,
     // `buffer_size_bytes` (original value from the first call) is the size of the allocated buffer.
     // After the call, `buffer_size_bytes` will be updated to the actual size written.
-    let mut actual_bytes_written = buffer_size_bytes; // Pass the allocated buffer size
     win_err_code = unsafe {
         RegQueryValueExW(
             hkey,
@@ -174,8 +176,8 @@ fn read_registry_string_value(hkey: HKEY, value_name: &str) -> WinResult<String>
 ///
 /// Returns `Error::Detection` if the primary registry key
 /// (`System\\CentralProcessor\\0`) cannot be opened. Failures to read individual
-/// values within the key are logged as debug messages but do not return an error,
-/// allowing the function to proceed with any information it can gather.
+/// values within the key are ignored (not an error), allowing the function to
+/// proceed with any information it can gather.
 ///
 /// # Remarks
 ///
@@ -186,6 +188,7 @@ fn read_registry_string_value(hkey: HKEY, value_name: &str) -> WinResult<String>
 pub(crate) fn detect_via_registry(vendor: &mut Vendor, model_name: &mut String) -> Result<()> {
     // crate::Result
     let pcwstr_subkey: PCWSTR = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+
     let mut hkey_opened = HKEY::default();
 
     // SAFETY: Calling Windows API to open a registry key.
@@ -212,49 +215,26 @@ pub(crate) fn detect_via_registry(vendor: &mut Vendor, model_name: &mut String) 
     let hkey_guard = RegistryKeyGuard::new(hkey_opened);
     let hkey = hkey_guard.0; // Use the HKEY from the guard for subsequent operations
 
-    // 1) Read ProcessorNameString
-    match read_registry_string_value(hkey, "ProcessorNameString") {
-        Ok(name_str) => {
-            log::debug!("Registry Fallback: ProcessorNameString = '{}'", name_str);
-            *model_name = name_str;
-        }
-        Err(e) => {
-            // For a fallback mechanism, failure to read a single value might not be critical.
-            // Log it and continue.
-            log::debug!(
-                "Registry Fallback: Failed to read ProcessorNameString: {}",
-                e
-            );
-        }
+    // 1) Read ProcessorNameString. For a fallback mechanism, failure to read a
+    // single value might not be critical; proceed with whatever was gathered.
+    if let Ok(name_str) = read_registry_string_value(hkey, "ProcessorNameString") {
+        *model_name = name_str;
     }
 
-    // 2) If "apple" is in the model name (already read) → set Vendor to Apple
+    // 2) If "apple" is in the model name (already read) -> set Vendor to Apple
     if model_name.to_lowercase().contains("apple") {
         *vendor = Vendor::Apple;
-        log::debug!(
-            "Registry Fallback: Vendor set to Apple based on model name: '{}'",
-            model_name
-        );
     }
 
-    // 3) Read Identifier → if ARMv8/ARM64 → set Vendor to Arm (mainly for Windows on ARM)
+    // 3) Read Identifier -> if ARMv8/ARM64 -> set Vendor to Arm (mainly for Windows on ARM)
     if *vendor == Vendor::Unknown {
         // Only check if vendor is not yet determined
-        match read_registry_string_value(hkey, "Identifier") {
-            Ok(idf_str) => {
-                log::debug!("Registry Fallback: Identifier = '{}'", idf_str);
-                let lower_idf = idf_str.to_lowercase();
-                // Windows on ARM often has "ARMv8" or similar in Identifier
-                if lower_idf.contains("armv8") || lower_idf.contains("arm64") {
-                    *vendor = Vendor::Arm;
-                    log::debug!(
-                        "Registry Fallback: Vendor set to ARM based on Identifier: '{}'",
-                        idf_str
-                    );
-                }
-            }
-            Err(e) => {
-                log::debug!("Registry Fallback: Failed to read Identifier: {}", e);
+        if let Ok(idf_str) = read_registry_string_value(hkey, "Identifier") {
+            let lower_idf = idf_str.to_lowercase();
+
+            // Windows on ARM often has "ARMv8" or similar in Identifier
+            if lower_idf.contains("armv8") || lower_idf.contains("arm64") {
+                *vendor = Vendor::Arm;
             }
         }
     }
@@ -262,26 +242,17 @@ pub(crate) fn detect_via_registry(vendor: &mut Vendor, model_name: &mut String) 
     // 4) Read VendorIdentifier
     if *vendor == Vendor::Unknown {
         // Only check if vendor is not yet determined
-        match read_registry_string_value(hkey, "VendorIdentifier") {
-            Ok(vid_str) => {
-                log::debug!("Registry Fallback: VendorIdentifier = '{}'", vid_str);
-                let lower_vid = vid_str.trim().to_lowercase();
-                match lower_vid.as_str() {
-                    "genuineintel" => *vendor = Vendor::Intel,
-                    "authenticamd" => *vendor = Vendor::Amd,
-                    "apple" => *vendor = Vendor::Apple, // Should already be caught, but for robustness
-                    other_vid if !other_vid.is_empty() => {
-                        *vendor = Vendor::Other(other_vid.to_string());
-                        log::debug!(
-                            "Registry Fallback: Vendor set to Other based on VendorIdentifier: '{}'",
-                            other_vid
-                        );
-                    }
-                    _ => {} // Empty or unhandled
+        if let Ok(vid_str) = read_registry_string_value(hkey, "VendorIdentifier") {
+            let lower_vid = vid_str.trim().to_lowercase();
+
+            match lower_vid.as_str() {
+                "genuineintel" => *vendor = Vendor::Intel,
+                "authenticamd" => *vendor = Vendor::Amd,
+                "apple" => *vendor = Vendor::Apple, // Should already be caught, but for robustness
+                other_vid if !other_vid.is_empty() => {
+                    *vendor = Vendor::Other;
                 }
-            }
-            Err(e) => {
-                log::debug!("Registry Fallback: Failed to read VendorIdentifier: {}", e);
+                _ => {} // Empty or unhandled
             }
         }
     }

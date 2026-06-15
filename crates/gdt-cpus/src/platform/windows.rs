@@ -11,10 +11,9 @@
 //! - Common utility functions specific to Windows platform code, available in
 //!   the [`utils`] submodule.
 //!
-//! The primary interface for CPU information is through `gdt_cpus::cpu_info()`,
-//! which will delegate to `cpu::detect_cpu_info()` when compiled for Windows.
-//! Similarly, affinity and priority functions in the crate root will use
-//! implementations from this module.
+//! The primary interface for CPU information is [`crate::CpuInfo::detect()`].
+//! Affinity and priority functions in the crate root use implementations from
+//! this module.
 
 pub(crate) mod affinity;
 pub(crate) mod cpu;

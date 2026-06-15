@@ -1,512 +1,525 @@
-//! macOS-specific CPU detection logic.
+//! macOS CPU topology detection via `sysctl` - flat model, synthetic LP layout.
 //!
-//! This module implements the core CPU detection capabilities for macOS systems.
-//! It primarily utilizes the `sysctl` interface to gather detailed information
-//! about the CPU, including vendor, model name, features, core counts (physical,
-//! logical, Performance/Efficiency for Apple Silicon), cache hierarchy, and topology.
+//! Apple Silicon only; see the compile_error gate in `mod.rs`.
 //!
-//! For x86_64 architectures, it also attempts to use `cpuid` instructions as a primary
-//! source for basic CPU details, falling back to `sysctl` if needed.
-//! The main entry point is the [`detect_cpu_info`] function.
-
-use log::warn;
+//! macOS exposes no LP -> core mapping and no thread affinity, so the per-LP
+//! records are SYNTHETIC with a PINNED layout: kinds in perflevel order
+//! (P first, then E), core-major within a kind - core `i` of a kind with SMT
+//! ratio `r` gets LP ids `[base + i*r, base + i*r + r)` with
+//! `smt_index = 0..r-1` (r = 1 on all Apple Silicon to date; the math stays
+//! general). The ids give masks/counts a consistent shape; they are NOT OS
+//! thread-placement ids - there is nothing to place against.
+//!
+//! Caches map 1:1 onto the per-kind model (`hw.perflevelN.*`). L3 domains are
+//! synthesized from `hw.perflevelN.{l3cachesize,cpusperl3}` when present -
+//! every current Apple Silicon chip reports neither (the SLC is not exposed)
+//! ⇒ zero domains in practice, but the interface defines the keys
+//! (Optimization Guide, Appendix B.2), so we query instead of hardcoding.
+//! Every key is defaulted on absence - no panic paths.
 
 use crate::{
-    CacheInfo, CacheLevel, CacheType, CoreInfo, CoreType, CpuFeatures, CpuInfo, Error, Result,
-    SocketInfo, Vendor,
-    platform::macos::utils::{sysctlbyname_int, sysctlbyname_string},
+    AffinityMask, CacheInfo, CoreKind, CpuFeatures, CpuInfo, Error, L3Domain, Lp, Result, Vendor,
 };
 
-/// Detects CPU vendor, model name, and features using `sysctl`.
+/// The detection pipeline's read seam.
 ///
-/// This function queries various `sysctl` MIBs like `machdep.cpu.brand_string`
-/// and `machdep.cpu.vendor`. For Apple Silicon CPUs, it also queries
-/// `hw.optional.arm.FEAT_*` and `hw.optional.neon` to determine supported CPU features.
-///
-/// This serves as a primary detection method on ARM64 (Apple Silicon) and as a
-/// fallback on x86_64 if `cpuid` fails or doesn't provide complete information.
-///
-/// # Arguments
-///
-/// * `vendor`: A mutable reference to [`Vendor`] to be updated.
-/// * `model_name`: A mutable reference to a `String` for the CPU model name.
-/// * `features`: A mutable reference to [`CpuFeatures`] to be populated.
-fn detect_cpu_via_sysctl(vendor: &mut Vendor, model_name: &mut String, features: &mut CpuFeatures) {
-    *model_name = sysctlbyname_string("machdep.cpu.brand_string").unwrap_or_else(|e| {
-        warn!("Failed to get model_name, defaulting to Unknown: {}", e);
-        "Unknown".to_string()
-    });
-    let vendor_str =
-        sysctlbyname_string("machdep.cpu.vendor").unwrap_or_else(|_| "Unknown".to_string());
+/// The live implementation wraps `sysctlbyname`; the fixture implementation
+/// (tests) replays a recorded dump - which is how non-macOS CI exercises this
+/// pipeline at all. `None` = key absent (ENOENT) or not of the requested
+/// shape; every caller defaults on absence.
+pub(crate) trait SysctlSource {
+    /// Integer key, width-resolved (4- and 8-byte kernel values both arrive
+    /// zero-extended to u64).
+    fn int(&self, key: &str) -> Option<u64>;
+    /// String key.
+    fn string(&self, key: &str) -> Option<String>;
+}
 
-    *vendor = match vendor_str.as_str() {
-        "GenuineIntel" => Vendor::Intel,
-        "AuthenticAMD" => Vendor::Amd,
-        "Apple" => Vendor::Apple,
-        _ => {
-            if model_name.to_lowercase().contains("apple")
-                || vendor_str.eq_ignore_ascii_case("apple")
-            {
-                Vendor::Apple
-            } else if model_name.to_lowercase().contains("intel") {
-                Vendor::Intel
-            } else if model_name.to_lowercase().contains("amd") {
-                Vendor::Amd
-            } else {
-                Vendor::Other(vendor_str)
-            }
-        }
+/// Live `sysctlbyname`-backed source.
+#[cfg(target_os = "macos")]
+pub(crate) struct LiveSysctl;
+
+#[cfg(target_os = "macos")]
+impl SysctlSource for LiveSysctl {
+    fn int(&self, key: &str) -> Option<u64> {
+        super::utils::sysctlbyname_int::<u64>(key).ok()
+    }
+
+    fn string(&self, key: &str) -> Option<String> {
+        super::utils::sysctlbyname_string(key).ok()
+    }
+}
+
+/// Detects CPU vendor, model name, and features using `sysctl`.
+fn detect_cpu_via_sysctl(
+    src: &impl SysctlSource,
+    vendor: &mut Vendor,
+    model_name: &mut String,
+    features: &mut CpuFeatures,
+) {
+    *model_name = src
+        .string("machdep.cpu.brand_string")
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let vendor_str = src
+        .string("machdep.cpu.vendor")
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    // Apple Silicon only: vendor is Apple unless sysctl reports something
+    // unrecognizable (then Other - never guess Intel/AMD on this platform).
+    *vendor = if vendor_str.eq_ignore_ascii_case("apple")
+        || model_name.to_lowercase().contains("apple")
+    {
+        Vendor::Apple
+    } else {
+        Vendor::Other
     };
 
     *features = CpuFeatures::default();
-    if *vendor == Vendor::Apple {
-        if sysctlbyname_int::<i32>("hw.optional.neon")
-            .map(|v| v == 1)
-            .unwrap_or(false)
-        {
+    // NOTE: CpuFeatures flags are per-ARCH (NEON/AES/SHA/CRC32 exist only on
+    // aarch64 builds), so feature mapping is compiled out of the x86_64 CI
+    // runs of this pipeline - fixtures there cover topology/caches/kinds,
+    // feature mapping is covered on aarch64 hosts.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let flag = |key: &str| src.int(key).map(|v| v == 1).unwrap_or(false);
+
+        // Standardized names first, legacy fallbacks second (Apple Silicon CPU
+        // Optimization Guide, Appendix B.1: "neon" et al. are legacy aliases).
+        if flag("hw.optional.AdvSIMD") || flag("hw.optional.neon") {
             features.insert(CpuFeatures::NEON);
         }
-        if sysctlbyname_int::<i32>("hw.optional.arm.FEAT_AES")
-            .map(|v| v == 1)
-            .unwrap_or(false)
-        {
+        if flag("hw.optional.arm.FEAT_AES") {
             features.insert(CpuFeatures::AES);
         }
-        let sha1 = sysctlbyname_int::<i32>("hw.optional.arm.FEAT_SHA1")
-            .map(|v| v == 1)
-            .unwrap_or(false);
-        let sha3 = sysctlbyname_int::<i32>("hw.optional.arm.FEAT_SHA3")
-            .map(|v| v == 1)
-            .unwrap_or(false);
-        let sha256 = sysctlbyname_int::<i32>("hw.optional.arm.FEAT_SHA256")
-            .map(|v| v == 1)
-            .unwrap_or(false);
-        let sha512 = sysctlbyname_int::<i32>("hw.optional.arm.FEAT_SHA512")
-            .map(|v| v == 1)
-            .unwrap_or(false);
-        if sha1 || sha3 || sha256 || sha512 {
+        if flag("hw.optional.arm.FEAT_SHA1")
+            || flag("hw.optional.arm.FEAT_SHA3")
+            || flag("hw.optional.arm.FEAT_SHA256")
+            || flag("hw.optional.arm.FEAT_SHA512")
+        {
             features.insert(CpuFeatures::SHA);
         }
-        if sysctlbyname_int::<i32>("hw.optional.arm.FEAT_CRC32")
-            .map(|v| v == 1)
-            .unwrap_or(false)
-        {
+        if flag("hw.optional.arm.FEAT_CRC32") || flag("hw.optional.armv8_crc32") {
             features.insert(CpuFeatures::CRC32);
         }
-        // FEAT_SME seems to be for Scalable Matrix Extension, not SVE directly
-        if sysctlbyname_int::<i32>("hw.optional.arm.FEAT_SME")
-            .map(|v| v == 1)
-            .unwrap_or(false)
-        {
-            features.insert(CpuFeatures::SVE);
+        if flag("hw.optional.arm.FEAT_FP16") {
+            features.insert(CpuFeatures::FP16);
+        }
+        if flag("hw.optional.arm.FEAT_DotProd") {
+            features.insert(CpuFeatures::DOTPROD);
+        }
+        if flag("hw.optional.arm.FEAT_I8MM") {
+            features.insert(CpuFeatures::I8MM);
+        }
+        if flag("hw.optional.arm.FEAT_BF16") {
+            features.insert(CpuFeatures::BF16);
+        }
+        // SVE2 is queried for symmetry; Apple Silicon implements no SVE, so this
+        // is always absent there (the flag exists for non-Apple ARM detection).
+        if flag("hw.optional.arm.FEAT_SVE2") {
+            features.insert(CpuFeatures::SVE2);
+        }
+        if flag("hw.optional.arm.FEAT_LSE") {
+            features.insert(CpuFeatures::LSE);
+        }
+        if flag("hw.optional.arm.FEAT_JSCVT") {
+            features.insert(CpuFeatures::JSCVT);
+        }
+        if flag("hw.optional.arm.FEAT_LRCPC") {
+            features.insert(CpuFeatures::LRCPC);
+        }
+        if flag("hw.optional.arm.FEAT_PMULL") {
+            features.insert(CpuFeatures::PMULL);
+        }
+        if flag("hw.optional.arm.FEAT_RDM") {
+            features.insert(CpuFeatures::RDM);
+        }
+        if flag("hw.optional.arm.FEAT_FHM") || flag("hw.optional.armv8_2_fhm") {
+            features.insert(CpuFeatures::FHM);
+        }
+        if flag("hw.optional.arm.FEAT_FCMA") {
+            features.insert(CpuFeatures::FCMA);
+        }
+        if flag("hw.optional.arm.FEAT_LSE2") {
+            features.insert(CpuFeatures::LSE2);
+        }
+        if flag("hw.optional.arm.FEAT_LRCPC2") {
+            features.insert(CpuFeatures::LRCPC2);
+        }
+        if flag("hw.optional.arm.FEAT_SM3") {
+            features.insert(CpuFeatures::SM3);
+        }
+        if flag("hw.optional.arm.FEAT_SM4") {
+            features.insert(CpuFeatures::SM4);
+        }
+        if flag("hw.optional.arm.FEAT_SVE_AES") {
+            features.insert(CpuFeatures::SVEAES);
+        }
+        if flag("hw.optional.arm.FEAT_SVE_PMULL128") {
+            features.insert(CpuFeatures::SVEPMULL);
+        }
+        if flag("hw.optional.arm.FEAT_SVE_BitPerm") {
+            features.insert(CpuFeatures::SVEBITPERM);
+        }
+        if flag("hw.optional.arm.FEAT_SVE_SHA3") {
+            features.insert(CpuFeatures::SVESHA3);
+        }
+        if flag("hw.optional.arm.FEAT_SVE_SM4") {
+            features.insert(CpuFeatures::SVESM4);
+        }
+        if flag("hw.optional.arm.FEAT_SVE_I8MM") {
+            features.insert(CpuFeatures::SVEI8MM);
+        }
+        if flag("hw.optional.arm.FEAT_SVE_BF16") {
+            features.insert(CpuFeatures::SVEBF16);
         }
     }
 }
 
-/// Detects basic CPU information (Vendor, Model Name, Features).
-///
-/// On `x86_64` architectures, this function first attempts to use `cpuid` instructions
-/// (via `crate::platform::common_x86_64::detect_via_cpuid`).
-/// If `cpuid` fails, is not available (e.g., on non-x86_64), or does not provide
-/// complete information, it falls back to using `detect_cpu_via_sysctl`.
-///
-/// # Returns
-///
-/// A `Result` containing a tuple of (`Vendor`, `String` (model name), `CpuFeatures`)
-/// if successful, or an `Error` otherwise (though errors from internal sysctl calls
-/// are often handled by returning default/unknown values).
-fn detect_basic_cpu_info() -> Result<(Vendor, String, CpuFeatures)> {
+/// One per-kind group of cores, read from `hw.perflevelN.*`.
+struct KindGroup {
+    kind: CoreKind,
+    cores: usize,
+    lps: usize,
+    l1d: CacheInfo,
+    l1i: CacheInfo,
+    l2: CacheInfo,
+    /// `hw.perflevelN.l3cachesize` - 0 (ENOENT) on every current Apple Silicon
+    /// chip, but the sysctl interface defines it (Optimization Guide, B.2);
+    /// read opportunistically instead of hardcoding "no L3".
+    l3_size: u64,
+    /// `hw.perflevelN.cpusperl3` - cores sharing one L3 instance.
+    cpus_per_l3: usize,
+}
+
+fn read_perflevel(
+    src: &impl SysctlSource,
+    level: u32,
+    kind: CoreKind,
+    line: u16,
+) -> Option<KindGroup> {
+    let cores = src
+        .int(&format!("hw.perflevel{}.physicalcpu", level))
+        .unwrap_or(0);
+
+    if cores == 0 {
+        return None;
+    }
+
+    let lps = src
+        .int(&format!("hw.perflevel{}.logicalcpu", level))
+        .unwrap_or(cores) as usize;
+    let smt = (lps / cores as usize).max(1) as u16;
+    let cache = |key: &str| -> u64 {
+        src.int(&format!("hw.perflevel{}.{}", level, key))
+            .unwrap_or(0)
+    };
+    let cpus_per_l2 = cache("cpusperl2").max(1) as u16;
+    let l3_size = cache("l3cachesize");
+
+    // Absent cpusperl3 with a present L3 = one domain spanning the group.
+    let cpus_per_l3 = match cache("cpusperl3") as usize {
+        0 => cores as usize,
+        n => n,
+    };
+
+    Some(KindGroup {
+        kind,
+        cores: cores as usize,
+        lps,
+        l1d: CacheInfo {
+            size_bytes: cache("l1dcachesize"),
+            line_bytes: line,
+            shared_by: smt,
+        },
+        l1i: CacheInfo {
+            size_bytes: cache("l1icachesize"),
+            line_bytes: line,
+            shared_by: smt,
+        },
+        l2: CacheInfo {
+            size_bytes: cache("l2cachesize"),
+            line_bytes: line,
+            shared_by: cpus_per_l2 * smt,
+        },
+        l3_size,
+        cpus_per_l3,
+    })
+}
+
+/// Detects CPU information on macOS (live sysctl).
+#[cfg(target_os = "macos")]
+pub fn detect_cpu_info() -> Result<CpuInfo> {
+    detect_at(&LiveSysctl)
+}
+
+/// The detection pipeline against any [`SysctlSource`] - pure logic, compiled
+/// (and fixture-tested) on every platform.
+pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
+    // --- Identity ---
     let mut vendor = Vendor::Unknown;
     let mut model_name = "Unknown".to_string();
     let mut features = CpuFeatures::default();
 
-    // For x86_64, prioritize raw-cpuid
-    #[cfg(target_arch = "x86_64")]
-    super::common_x86_64::detect_via_cpuid(&mut vendor, &mut model_name, &mut features);
+    detect_cpu_via_sysctl(src, &mut vendor, &mut model_name, &mut features);
 
-    // Fallback to /proc/cpuinfo for non-x86_64 or if CPUID failed
-    if vendor == Vendor::Unknown || model_name == "Unknown" || features.is_empty() {
-        detect_cpu_via_sysctl(&mut vendor, &mut model_name, &mut features);
-    }
+    // --- Counts ---
+    let socket_count = src.int("hw.packages").unwrap_or(1).max(1) as usize;
+    let physical = src.int("hw.physicalcpu").unwrap_or(0) as usize;
+    let logical = src.int("hw.logicalcpu").unwrap_or(0) as usize;
 
-    Ok((vendor, model_name, features))
-}
-
-/// Detects comprehensive CPU information on macOS systems.
-///
-/// This function orchestrates the CPU detection process by:
-/// 1.  **Fetching Basic CPU Details:** Calls `detect_basic_cpu_info()` to get vendor,
-///     model name, and features (using `cpuid` on x86_64 with `sysctl` fallback,
-///     or primarily `sysctl` for Apple Silicon).
-/// 2.  **Querying Core Counts & Topology via `sysctl`:**
-///     - Retrieves total socket count (`hw.packages`), physical core count (`hw.physicalcpu`),
-///       and logical processor count (`hw.logicalcpu`).
-///     - For Apple Silicon, determines Performance-core (P-core) and Efficiency-core (E-core)
-///       counts using `hw.perflevel0.physicalcpu` and `hw.perflevel1.physicalcpu` respectively.
-///       Includes logic to handle cases where these specific keys might be unavailable but
-///       `hw.nperflevels` indicates a hybrid architecture.
-///     - For Intel/AMD, all physical cores are currently assumed to be Performance-cores.
-/// 3.  **Gathering Cache Information via `sysctl`:**
-///     - Gets the L1 cache line size (`hw.cachelinesize`).
-///     - For Apple Silicon: Reads L1I, L1D, and L2 cache sizes per P-core/E-core cluster
-///       (e.g., `hw.perflevel0.l1icachesize`, `hw.perflevel0.l2cachesize`, `hw.perflevel0.cpusperl2`).
-///       Note: L3 cache for Apple Silicon is typically system-level and its detailed attribution
-///       to specific core types or clusters via sysctl is less direct; this function attempts
-///       to read `hw.l3cachesize_pkg` for a package-level L3 if available.
-///     - For Intel/AMD: Reads `hw.l1icachesize`, `hw.l1dcachesize`, `hw.l2cachesize` (per-core),
-///       and `hw.l3cachesize` (shared).
-/// 4.  **Constructing Topology:**
-///     - Builds `SocketInfo` and `CoreInfo` structures.
-///     - Assigns logical processors to their respective physical cores.
-///     - Sets `CoreType` (Performance/Efficiency) for each core.
-///     - Populates `CacheInfo` for L1, L2 (per core or per cluster for Apple Silicon), and L3 caches.
-/// 5.  **NUMA Information:** Currently, NUMA information is simplified, assuming a single NUMA node (ID 0)
-///     as macOS does not expose detailed NUMA topology as readily as other platforms.
-///
-/// # Returns
-///
-/// A `Result<CpuInfo>` containing the populated `CpuInfo` struct, or an `Error` if
-/// critical detection steps fail (e.g., `hw.physicalcpu` returns 0).
-///
-/// # Panics
-///
-/// This function may panic if `sysctlbyname_int` calls for essential Apple Silicon cache
-/// information (e.g., `hw.perflevel0.l1icachesize`) fail, as these are currently `.expect()`-ed.
-/// Other `sysctl` errors are generally handled by falling back to default values or logging warnings.
-pub fn detect_cpu_info() -> Result<CpuInfo> {
-    // --- Vendor, Model, and Features ---
-    let (vendor, model_name, features) = detect_basic_cpu_info()?;
-
-    // --- Core Counts & Topology ---
-    let total_sockets_count = sysctlbyname_int::<u32>("hw.packages").unwrap_or(1).max(1) as usize;
-    let total_physical_cores_count =
-        sysctlbyname_int::<u32>("hw.physicalcpu").unwrap_or(0) as usize;
-    let total_logical_processors_count =
-        sysctlbyname_int::<u32>("hw.logicalcpu").unwrap_or(0) as usize;
-
-    if total_physical_cores_count == 0 {
+    if physical == 0 || logical == 0 {
         return Err(Error::Detection(
-            "Failed to detect any physical cores (hw.physicalcpu returned 0 or error)".to_string(),
+            "hw.physicalcpu / hw.logicalcpu unavailable".to_string(),
         ));
     }
 
-    let mut detected_performance_cores = 0;
-    let mut detected_efficiency_cores = 0;
+    let line = src.int("hw.cachelinesize").unwrap_or(64) as u16;
 
-    // Apple Silicon P/E core detection
-    if vendor == Vendor::Apple {
-        // Try to get P/E core counts directly for Apple Silicon
-        if let Ok(p_cores) = sysctlbyname_int::<u32>("hw.perflevel0.physicalcpu") {
-            detected_performance_cores = p_cores as usize;
-        } else {
-            warn!("Could not read hw.perflevel0.physicalcpu for P-core count.");
-        }
-        if let Ok(e_cores) = sysctlbyname_int::<u32>("hw.perflevel1.physicalcpu") {
-            detected_efficiency_cores = e_cores as usize;
-        } else {
-            warn!("Could not read hw.perflevel1.physicalcpu for E-core count.");
-        }
+    // --- Per-kind groups: perflevel0 = P, perflevel1 = E; absence => homogeneous all-P ---
+    let mut groups: Vec<KindGroup> = Vec::new();
 
-        // If counts are still zero but hw.nperflevels suggests a hybrid architecture,
-        // it's an anomaly. We previously defaulted to total_physical_cores for P-cores.
-        // Given the new sysctl values, if perflevel counts are zero, it's more likely an issue or non-hybrid.
-        if detected_performance_cores == 0
-            && detected_efficiency_cores == 0
-            && total_physical_cores_count > 0
-        {
-            if sysctlbyname_int::<i32>("hw.nperflevels").unwrap_or(0) > 1 {
-                warn!(
-                    "Hybrid architecture indicated by hw.nperflevels, but P/E core counts are zero. Reporting all as P-cores."
-                );
-                detected_performance_cores = total_physical_cores_count;
-            } else {
-                // Not hybrid or nperflevels not available, assume all are P-cores
-                detected_performance_cores = total_physical_cores_count;
-            }
-        } else if (detected_performance_cores + detected_efficiency_cores)
-            != total_physical_cores_count
-            && (detected_performance_cores > 0 || detected_efficiency_cores > 0)
-        {
-            warn!(
-                "Sum of P-cores ({}) and E-cores ({}) does not match total physical cores ({}). Using detected P/E counts.",
-                detected_performance_cores, detected_efficiency_cores, total_physical_cores_count
-            );
-            // Trust the perflevel counts if they are non-zero, even if sum mismatches.
-            // The total_physical_cores_count will be the sum of these for consistency in CpuInfo.
-            // total_physical_cores_count = detected_performance_cores + detected_efficiency_cores; // This might hide an OS reporting issue.
-            // Better to report what OS gives for total and what it gives for P/E separately.
-        }
-    } else {
-        // For Intel/AMD, assume all physical cores are performance if not further specified by OS
-        detected_performance_cores = total_physical_cores_count;
+    if let Some(p) = read_perflevel(src, 0, CoreKind::Performance, line) {
+        groups.push(p);
     }
 
-    // --- Cache Information ---
-    let cache_line_size = sysctlbyname_int::<u64>("hw.cachelinesize").unwrap_or(64) as usize; // Default to 64 if not found
-
-    /// Helper struct to temporarily store cache information for an Apple Silicon core cluster (P or E).
-    #[derive(Copy, Clone)]
-    struct AppleSiliconCacheInfo {
-        l1i_cache_size: u64,
-        l1d_cache_size: u64,
-        l2_cache_size: u64,
-        cores_sharing_l2: u32,
+    if let Some(e) = read_perflevel(src, 1, CoreKind::Efficiency, line) {
+        groups.push(e);
     }
 
-    // Cache sizes per P/E cores of Apple Silicon
-    let p_core_cache_info = if vendor == Vendor::Apple {
-        let p_cluster_l1i_cache_size = sysctlbyname_int::<u32>("hw.perflevel0.l1icachesize").expect(
-            "Failed to get L1i cache size for performance cluster (hw.perflevel0.l1icachesize)",
-        ) as u64;
-        let p_cluster_l1d_cache_size = sysctlbyname_int::<u32>("hw.perflevel0.l1dcachesize").expect(
-            "Failed to get L1d cache size for performance cluster (hw.perflevel0.l1dcachesize)",
-        ) as u64;
-        let p_cluster_l2_cache_size = sysctlbyname_int::<u32>("hw.perflevel0.l2cachesize").expect(
-            "Failed to get L2 cache size for performance cluster (hw.perflevel0.l2cachesize)",
-        ) as u64;
-        let p_cores_sharing_l2 = sysctlbyname_int::<u32>("hw.perflevel0.cpusperl2").expect(
-            "Failed to get cores sharing L2 cache for performance cluster (hw.perflevel0.cpusperl2)",
-        );
+    if groups.is_empty() || groups[0].kind != CoreKind::Performance {
+        // No perflevels or only an E group reported (anomaly - every Apple
+        // Silicon macOS has hw.perflevel0): homogeneous invariant says all-P.
+        let smt = (logical / physical).max(1) as u16;
+        let direct = |key: &str| -> u64 { src.int(key).unwrap_or(0) };
 
-        Some(AppleSiliconCacheInfo {
-            l1i_cache_size: p_cluster_l1i_cache_size,
-            l1d_cache_size: p_cluster_l1d_cache_size,
-            l2_cache_size: p_cluster_l2_cache_size,
-            cores_sharing_l2: p_cores_sharing_l2,
-        })
-    } else {
-        None
-    };
+        groups = vec![KindGroup {
+            kind: CoreKind::Performance,
+            cores: physical,
+            lps: logical,
+            l1d: CacheInfo {
+                size_bytes: direct("hw.l1dcachesize"),
+                line_bytes: line,
+                shared_by: smt,
+            },
+            l1i: CacheInfo {
+                size_bytes: direct("hw.l1icachesize"),
+                line_bytes: line,
+                shared_by: smt,
+            },
+            l2: CacheInfo {
+                size_bytes: direct("hw.l2cachesize"),
+                line_bytes: line,
+                shared_by: smt,
+            },
+            l3_size: direct("hw.l3cachesize"),
+            cpus_per_l3: physical,
+        }];
+    }
 
-    let e_core_cache_info = if vendor == Vendor::Apple {
-        let e_cluster_l1i_cache_size = sysctlbyname_int::<u32>("hw.perflevel1.l1icachesize").expect(
-            "Failed to get L1i cache size for efficiency cluster (hw.perflevel1.l1icachesize)",
-        ) as u64;
-        let e_cluster_l1d_cache_size = sysctlbyname_int::<u32>("hw.perflevel1.l1dcachesize").expect(
-            "Failed to get L1d cache size for efficiency cluster (hw.perflevel1.l1dcachesize)",
-        ) as u64;
-        let e_cluster_l2_cache_size = sysctlbyname_int::<u32>("hw.perflevel1.l2cachesize").expect(
-            "Failed to get L2 cache size for efficiency cluster (hw.perflevel1.l2cachesize)",
-        ) as u64;
-        let e_cores_sharing_l2 = sysctlbyname_int::<u32>("hw.perflevel1.cpusperl2").expect(
-            "Failed to get cores sharing L2 cache for efficiency cluster (hw.perflevel1.cpusperl2)",
-        );
+    // --- Synthetic LP records (pinned layout, see module doc) ---
+    // L3: no current Apple Silicon exposes one (the SLC is hidden ⇒ in
+    // practice zero domains, every LP keeps Lp::NO_L3) - but the sysctl
+    // interface DEFINES hw.perflevelN.{l3cachesize,cpusperl3} (Optimization
+    // Guide, Appendix B.2), so synthesize domains from them when present
+    // instead of hardcoding the absence: consecutive cores within a kind,
+    // cpus_per_l3 per domain.
+    let mut lps: Vec<Lp> = Vec::with_capacity(logical);
+    let mut l3_domains: Vec<L3Domain> = Vec::new();
+    let mut l1d = [CacheInfo::default(); CoreKind::COUNT];
+    let mut l1i = [CacheInfo::default(); CoreKind::COUNT];
+    let mut l2 = [CacheInfo::default(); CoreKind::COUNT];
+    let mut kind_core_counts = [0u16; CoreKind::COUNT];
+    let mut next_lp: usize = 0;
+    let mut next_core: usize = 0;
 
-        Some(AppleSiliconCacheInfo {
-            l1i_cache_size: e_cluster_l1i_cache_size,
-            l1d_cache_size: e_cluster_l1d_cache_size,
-            l2_cache_size: e_cluster_l2_cache_size,
-            cores_sharing_l2: e_cores_sharing_l2,
-        })
-    } else {
-        None
-    };
+    let total_cores: usize = groups.iter().map(|g| g.cores).sum();
 
-    // Global L3 cache (typically per socket or system-wide)
-    let sys_l3_cache_total_size = sysctlbyname_int::<u64>("hw.l3cachesize").ok();
+    for (group_idx, group) in groups.iter().enumerate() {
+        // perf_hint: perflevel order, higher = faster (perflevel0 = best).
+        // Coarse but honest - macOS exposes no finer per-core signal.
+        let perf_hint = (groups.len() - group_idx) as u16;
+        let k = group.kind.index();
 
-    // --- Building the Simplified Topology ---
-    let mut sockets_vec = Vec::with_capacity(total_sockets_count);
-    let physical_cores_per_socket = if total_sockets_count > 0 {
-        total_physical_cores_count.div_ceil(total_sockets_count)
-    } else {
-        0 // Should not happen if total_physical_cores_count > 0 and total_sockets_count is at least 1
-    };
-    let logical_processors_per_physical_core = if total_physical_cores_count > 0 {
-        total_logical_processors_count.div_ceil(total_physical_cores_count)
-    } else {
-        1 // Avoid division by zero
-    };
+        l1d[k] = group.l1d;
+        l1i[k] = group.l1i;
+        l2[k] = group.l2;
+        kind_core_counts[k] += group.cores as u16;
 
-    let mut current_physical_core_id_counter = 0;
-    let mut current_logical_processor_id_counter = 0;
+        let smt = (group.lps / group.cores).max(1);
+        let group_domain_base = l3_domains.len();
 
-    for socket_idx in 0..total_sockets_count {
-        let mut cores_for_this_socket_vec = Vec::new();
-        let num_phys_cores_this_socket = if socket_idx == total_sockets_count - 1 {
-            total_physical_cores_count
-                .saturating_sub(physical_cores_per_socket * (total_sockets_count - 1))
-        } else {
-            physical_cores_per_socket
-        };
+        for core_i in 0..group.cores {
+            // hw.packages is 1 on all Apple Silicon; the even split is kept as
+            // a defensive generality, not a supported configuration.
+            let socket = (next_core * socket_count / total_cores.max(1)) as u8;
+            let l3_domain = if group.l3_size > 0 && l3_domains.len() < usize::from(Lp::NO_L3) {
+                let idx = group_domain_base + core_i / group.cpus_per_l3;
 
-        for _core_local_idx in 0..num_phys_cores_this_socket {
-            if current_physical_core_id_counter >= total_physical_cores_count {
-                break;
-            }
+                if idx == l3_domains.len() {
+                    l3_domains.push(L3Domain {
+                        size_bytes: group.l3_size,
+                        mask: AffinityMask::empty(),
+                        core_count: 0,
+                    });
+                }
 
-            let core_global_id = current_physical_core_id_counter;
-            let core_type = if core_global_id < detected_performance_cores {
-                CoreType::Performance
+                l3_domains[idx].core_count += 1;
+
+                idx as u8
             } else {
-                CoreType::Efficiency
+                Lp::NO_L3
             };
 
-            let mut logical_processor_ids_for_this_core = Vec::new();
-            let num_lps_this_core =
-                if current_physical_core_id_counter == total_physical_cores_count - 1 {
-                    total_logical_processors_count.saturating_sub(
-                        logical_processors_per_physical_core
-                            * (total_physical_cores_count.saturating_sub(1)),
-                    )
-                } else {
-                    logical_processors_per_physical_core
-                };
-
-            for _ in 0..num_lps_this_core {
-                if current_logical_processor_id_counter < total_logical_processors_count {
-                    logical_processor_ids_for_this_core.push(current_logical_processor_id_counter);
-                    current_logical_processor_id_counter += 1;
+            for sibling in 0..smt {
+                if l3_domain != Lp::NO_L3 {
+                    l3_domains[l3_domain as usize].mask.add(next_lp);
                 }
+
+                lps.push(Lp {
+                    os_id: next_lp as u16,
+                    core: next_core as u16,
+                    socket,
+                    l3_domain,
+                    numa_node: 0,
+                    kind: group.kind,
+                    smt_index: sibling as u8,
+                    perf_hint,
+                    // NOTE(macos): sysctl exposes no per-core MIDR part on Apple
+                    // Silicon; perflevel order already classifies P/E. Leave 0.
+                    cpu_part: 0,
+                });
+
+                next_lp += 1;
             }
 
-            let mut l1i_cache = None;
-            let mut l1d_cache = None;
-            let mut l2_cache = None;
-
-            if vendor == Vendor::Apple {
-                match core_type {
-                    CoreType::Performance => {
-                        if let Some(cache_info) = p_core_cache_info {
-                            if detected_performance_cores > 0 {
-                                l1i_cache = Some(CacheInfo {
-                                    level: CacheLevel::L1,
-                                    cache_type: CacheType::Instruction,
-                                    size_bytes: cache_info.l1i_cache_size,
-                                    line_size_bytes: cache_line_size,
-                                });
-                                l1d_cache = Some(CacheInfo {
-                                    level: CacheLevel::L1,
-                                    cache_type: CacheType::Data,
-                                    size_bytes: cache_info.l1d_cache_size,
-                                    line_size_bytes: cache_line_size,
-                                });
-                            }
-                            if cache_info.cores_sharing_l2 > 0 && detected_performance_cores > 0 {
-                                let num_l2_clusters = (detected_performance_cores as f64
-                                    / cache_info.cores_sharing_l2 as f64)
-                                    .ceil()
-                                    as u64;
-                                if num_l2_clusters > 0 {
-                                    l2_cache = Some(CacheInfo {
-                                        level: CacheLevel::L2,
-                                        cache_type: CacheType::Unified,
-                                        size_bytes: cache_info.l2_cache_size,
-                                        line_size_bytes: cache_line_size,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    CoreType::Efficiency => {
-                        if let Some(cache_info) = e_core_cache_info {
-                            if detected_efficiency_cores > 0 {
-                                l1i_cache = Some(CacheInfo {
-                                    level: CacheLevel::L1,
-                                    cache_type: CacheType::Instruction,
-                                    size_bytes: cache_info.l1i_cache_size,
-                                    line_size_bytes: cache_line_size,
-                                });
-                                l1d_cache = Some(CacheInfo {
-                                    level: CacheLevel::L1,
-                                    cache_type: CacheType::Data,
-                                    size_bytes: cache_info.l1d_cache_size,
-                                    line_size_bytes: cache_line_size,
-                                });
-                            }
-                            if cache_info.cores_sharing_l2 > 0 && detected_efficiency_cores > 0 {
-                                let num_l2_clusters = (detected_efficiency_cores as f64
-                                    / cache_info.cores_sharing_l2 as f64)
-                                    .ceil()
-                                    as u64;
-                                if num_l2_clusters > 0 {
-                                    l2_cache = Some(CacheInfo {
-                                        level: CacheLevel::L2,
-                                        cache_type: CacheType::Unified,
-                                        size_bytes: cache_info.l2_cache_size,
-                                        line_size_bytes: cache_line_size,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    CoreType::Unknown => {} // Should not happen if P/E detection is robust
-                }
-            } else {
-                // Fallback for Intel/AMD or if Apple specific sysctls fail for some reason
-                let global_l1i_total = sysctlbyname_int::<u64>("hw.l1icachesize").unwrap_or(0);
-                let global_l1d_total = sysctlbyname_int::<u64>("hw.l1dcachesize").unwrap_or(0);
-                let global_l2_total = sysctlbyname_int::<u64>("hw.l2cachesize").unwrap_or(0);
-
-                if global_l1i_total > 0 && total_physical_cores_count > 0 {
-                    l1i_cache = Some(CacheInfo {
-                        level: CacheLevel::L1,
-                        cache_type: CacheType::Instruction,
-                        size_bytes: global_l1i_total / total_physical_cores_count as u64,
-                        line_size_bytes: cache_line_size,
-                    });
-                }
-                if global_l1d_total > 0 && total_physical_cores_count > 0 {
-                    l1d_cache = Some(CacheInfo {
-                        level: CacheLevel::L1,
-                        cache_type: CacheType::Data,
-                        size_bytes: global_l1d_total / total_physical_cores_count as u64,
-                        line_size_bytes: cache_line_size,
-                    });
-                }
-                if global_l2_total > 0 && total_physical_cores_count > 0 {
-                    l2_cache = Some(CacheInfo {
-                        level: CacheLevel::L2,
-                        cache_type: CacheType::Unified,
-                        size_bytes: global_l2_total / total_physical_cores_count as u64,
-                        line_size_bytes: cache_line_size,
-                    });
-                }
-            }
-
-            cores_for_this_socket_vec.push(CoreInfo {
-                id: core_global_id,
-                socket_id: socket_idx,
-                core_type,
-                logical_processor_ids: logical_processor_ids_for_this_core,
-                l1_instruction_cache: l1i_cache,
-                l1_data_cache: l1d_cache,
-                l2_cache,
-            });
-            current_physical_core_id_counter += 1;
+            next_core += 1;
         }
-
-        let l3_cache_this_socket = if let Some(total_l3_size) = sys_l3_cache_total_size {
-            if total_sockets_count > 0 {
-                Some(CacheInfo {
-                    level: CacheLevel::L3,
-                    cache_type: CacheType::Unified,
-                    size_bytes: total_l3_size / total_sockets_count as u64, // Assumes L3 is evenly split per socket if multiple sockets
-                    line_size_bytes: cache_line_size,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        sockets_vec.push(SocketInfo {
-            id: socket_idx,
-            cores: cores_for_this_socket_vec,
-            l3_cache: l3_cache_this_socket,
-        });
     }
 
     Ok(CpuInfo {
+        lps,
+        core_count: next_core as u16,
+        socket_count: socket_count as u8,
+        numa_node_count: 1,
+        kind_core_counts,
+        l3_domains,
+        l1d,
+        l1i,
+        l2,
         vendor,
         model_name,
         features,
-        sockets: sockets_vec,
-        total_sockets: total_sockets_count,
-        total_physical_cores: total_physical_cores_count,
-        total_logical_processors: total_logical_processors_count,
-        total_performance_cores: detected_performance_cores,
-        total_efficiency_cores: detected_efficiency_cores,
     })
+}
+
+/// Fixture-driven macOS detection tests - these run on EVERY platform, which
+/// is the whole point of the [`SysctlSource`] seam: Linux CI catches macOS
+/// detection breakage without Apple hardware.
+#[cfg(test)]
+mod fixture_tests {
+    use std::collections::HashMap;
+
+    use super::{SysctlSource, detect_at};
+    use crate::platform::fixture_expected::{check_expected, fixture_root};
+
+    /// Replays a recorded `sysctl.txt` dump from the shared fixture corpus.
+    ///
+    /// Line format, language-neutral on purpose (the Zig test suite parses
+    /// the same dumps): `i4 <key> <value>` / `i8 <key> <value>` for integers
+    /// (recorded kernel width - Darwin sysctl keys are MIXED-width),
+    /// `s <key> <value...>` for strings. `#` comments and blanks ignored.
+    struct FixtureSysctl {
+        ints: HashMap<String, u64>,
+        strs: HashMap<String, String>,
+    }
+
+    impl FixtureSysctl {
+        fn load(name: &str) -> Self {
+            let path = fixture_root(name).join("sysctl.txt");
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("missing {}: {}", path.display(), e));
+
+            let mut ints = HashMap::new();
+            let mut strs = HashMap::new();
+
+            for line in text.lines() {
+                let line = line.trim();
+
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+
+                let mut parts = line.splitn(3, ' ');
+                let (tag, key, value) = (
+                    parts.next().unwrap(),
+                    parts
+                        .next()
+                        .unwrap_or_else(|| panic!("malformed: {}", line)),
+                    parts.next().unwrap_or(""),
+                );
+
+                match tag {
+                    "i4" | "i8" => {
+                        let v = value
+                            .parse::<i64>()
+                            .unwrap_or_else(|_| panic!("bad int in: {}", line));
+
+                        // Mimic the live helper: 4-byte values arrive
+                        // zero-extended, not sign-extended.
+                        let v = if tag == "i4" {
+                            (v as u32) as u64
+                        } else {
+                            v as u64
+                        };
+
+                        ints.insert(key.to_string(), v);
+                    }
+                    "s" => {
+                        strs.insert(key.to_string(), value.to_string());
+                    }
+                    other => panic!("unknown sysctl.txt tag {} in: {}", other, line),
+                }
+            }
+
+            FixtureSysctl { ints, strs }
+        }
+    }
+
+    impl SysctlSource for FixtureSysctl {
+        fn int(&self, key: &str) -> Option<u64> {
+            self.ints.get(key).copied()
+        }
+
+        fn string(&self, key: &str) -> Option<String> {
+            self.strs.get(key).cloned()
+        }
+    }
+
+    fn run_fixture(name: &str) {
+        // Same skip contract as the Linux fixtures. Key on the dump itself, so
+        // a pre-authored expected.txt without a recording also skips instead of
+        // failing.
+        let dump = fixture_root(name).join("sysctl.txt");
+
+        if !dump.exists() {
+            eprintln!(
+                "fixture {} has no sysctl.txt at {} (set GDT_CPUS_FIXTURES to enable) - skipped",
+                name,
+                dump.display()
+            );
+            return;
+        }
+
+        let src = FixtureSysctl::load(name);
+        let info =
+            detect_at(&src).unwrap_or_else(|e| panic!("detect_at failed for {}: {}", name, e));
+
+        check_expected(&info, name);
+    }
+
+    #[test]
+    fn fixture_m3_max_perflevels() {
+        run_fixture("sysctl-m3-max");
+    }
 }

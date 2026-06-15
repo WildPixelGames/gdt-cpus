@@ -29,10 +29,16 @@ use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 ///
 /// # Examples
 ///
-/// ```
+/// ```rust
+/// use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+///
+/// fn to_wide_null_vec(s: &str) -> Vec<u16> {
+///     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+/// }
+///
 /// fn get_example_vec() -> Vec<u16> {
-///   let rust_str = "Hello";
-///   super::to_wide_null_vec(rust_str)
+///     let rust_str = "Hello";
+///     to_wide_null_vec(rust_str)
 /// }
 /// let wide_vec = get_example_vec();
 ///

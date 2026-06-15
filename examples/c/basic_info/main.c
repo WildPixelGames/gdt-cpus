@@ -1,12 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <inttypes.h>
 
 #include "gdt_cpus/gdt_cpus.h"
 
-int main()
+int main(void)
 {
-  GdtCpusCpuInfo info = {};
+  GdtCpusCpuInfo info = {0};
   int32_t res = gdt_cpus_cpu_info(&info);
 
   if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
@@ -17,8 +18,6 @@ int main()
 
   bool is_hybrid = false;
   res = gdt_cpus_is_hybrid(&is_hybrid);
-
-  // Should always succeed if the first call to gdt_cpus_cpu_info() succeeded
   if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
   {
     printf("Error checking hybrid architecture: %s\n", gdt_cpus_error_code_description(res));
@@ -29,166 +28,92 @@ int main()
   printf("---------------\n");
   printf("Vendor: %s\n", info.vendor_name);
   printf("Model: %s\n", info.model_name);
-  printf("Physical cores: %lld\n", info.total_physical_cores);
-  printf("Logical cores: %lld\n", info.total_logical_processors);
-  printf("Performance cores: %lld\n", info.total_performance_cores);
-  printf("Efficiency cores: %lld\n", info.total_efficiency_cores);
+  printf("Sockets: %" PRIu64 "\n", info.socket_count);
+  printf("Physical cores: %" PRIu64 "\n", info.core_count);
+  printf("Logical cores: %" PRIu64 "\n", info.lp_count);
+  printf("Performance cores: %" PRIu64 "\n", info.performance_cores);
+  printf("Efficiency cores: %" PRIu64 "\n", info.efficiency_cores);
+  printf("LP-Efficiency cores: %" PRIu64 "\n", info.lp_efficiency_cores);
+  printf("NUMA nodes: %" PRIu64 "\n", info.numa_node_count);
   printf("Hybrid architecture: %s\n", is_hybrid ? "Yes" : "No");
 
-  for (uint64_t socket_id = 0; socket_id < info.sockets_count; ++socket_id)
+  printf("\nL3 domains: %" PRIu64 "\n", info.l3_domain_count);
+  for (uint64_t d = 0; d < info.l3_domain_count; ++d)
   {
-    GdtCpusSocketInfo socket = {};
-    res = gdt_cpus_get_socket_info(socket_id, &socket);
-
+    GdtCpusL3Domain domain = {0};
+    res = gdt_cpus_get_l3_domain(d, &domain);
     if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
     {
-      printf("Error retrieving socket info: %s\n", gdt_cpus_error_code_description(res));
+      printf("Error retrieving L3 domain: %s\n", gdt_cpus_error_code_description(res));
       return 1;
     }
-
-    printf("\nProcessor #%lld (Socket ID: %lld)\n", socket_id, socket.id);
-
-    if (socket.has_l3_cache)
+    printf("  domain %" PRIu64 ": %" PRIu64 " MiB, %u cores, %u threads (lps:",
+           d, domain.size_bytes / (1024 * 1024), domain.core_count, domain.lp_count);
+    for (uint32_t i = 0; i < domain.lp_count; ++i)
     {
-      GdtCpusCacheInfo l3_cache = {};
-      res = gdt_cpus_get_l3_cache_info(socket_id, &l3_cache);
-
-      if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
+      uint32_t os_id = 0;
+      if (gdt_cpus_get_l3_domain_lp(d, i, &os_id) == GDT_CPUS_ERROR_CODE_SUCCESS)
       {
-        printf("Error retrieving L3 cache info: %s\n", gdt_cpus_error_code_description(res));
-        return 1;
-      }
-
-      printf("  L3 Cache: %lld KB\n", l3_cache.size_bytes / 1024);
-    }
-
-    printf("  Cores:\n");
-    for (uint64_t core_id = 0; core_id < socket.cores_count; ++core_id)
-    {
-      GdtCpusCoreInfo core = {};
-      res = gdt_cpus_get_core_info(socket_id, core_id, &core);
-
-      if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
-      {
-        printf("Error retrieving core info: %s\n", gdt_cpus_error_code_description(res));
-        return 1;
-      }
-
-      printf(
-          "    Core #%lld: %s core with %lld threads\n",
-          core.id,
-          gdt_cpus_core_type_description(core.core_type),
-          core.logical_processor_ids_count);
-
-      if (core.has_l1_instruction_cache)
-      {
-        GdtCpusCacheInfo l1i_cache = {};
-        res = gdt_cpus_get_l1i_cache_info(socket_id, core_id, &l1i_cache);
-
-        if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
-        {
-          printf("Error retrieving L1i Cache info: %s\n", gdt_cpus_error_code_description(res));
-          return 1;
-        }
-
-        printf("      L1i Cache: %lld KB\n", l1i_cache.size_bytes / 1024);
-      }
-      else
-      {
-        printf("      L1i Cache: Not available\n");
-      }
-
-      if (core.has_l1_data_cache)
-      {
-        GdtCpusCacheInfo l1d_cache = {};
-        res = gdt_cpus_get_l1d_cache_info(socket_id, core_id, &l1d_cache);
-
-        if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
-        {
-          printf("Error retrieving L1d Cache info: %s\n", gdt_cpus_error_code_description(res));
-          return 1;
-        }
-
-        printf("      L1d Cache: %lld KB\n", l1d_cache.size_bytes / 1024);
-      }
-      else
-      {
-        printf("      L1d Cache: Not available\n");
-      }
-
-      if (core.has_l2_cache)
-      {
-        GdtCpusCacheInfo l2_cache = {};
-        res = gdt_cpus_get_l2_cache_info(socket_id, core_id, &l2_cache);
-
-        if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
-        {
-          printf("Error retrieving L2 Cache info: %s\n", gdt_cpus_error_code_description(res));
-          return 1;
-        }
-
-        printf("      L2 Cache: %lld KB\n", l2_cache.size_bytes / 1024);
-      }
-      else
-      {
-        printf("      L2 Cache: Not available\n");
+        printf(" %u", os_id);
       }
     }
+    printf(")\n");
   }
 
-  uint32_t features = 0;
-  res = gdt_cpus_get_features(&features);
+  printf("\nPer-kind caches:\n");
+  const GdtCpusCoreKind kinds[] = {
+      GDT_CPUS_CORE_KIND_PERFORMANCE,
+      GDT_CPUS_CORE_KIND_EFFICIENCY,
+      GDT_CPUS_CORE_KIND_LP_EFFICIENCY,
+  };
+  for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); ++k)
+  {
+    uint64_t cores_of_kind = 0;
+    if (gdt_cpus_num_cores_of_kind(kinds[k], &cores_of_kind) != GDT_CPUS_ERROR_CODE_SUCCESS ||
+        cores_of_kind == 0)
+    {
+      continue;
+    }
 
-  if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
-  {
-    printf("Error retrieving CPU features: %s\n", gdt_cpus_error_code_description(res));
-    return 1;
-  }
-
-// Example of checking for a feature (adjust feature name based on your arch)
-#if defined(GDT_CPUS_ARCH_X86_64)
-  if ((features & GDT_CPUS_CPU_FEATURES_SSE2) == GDT_CPUS_CPU_FEATURES_SSE2)
-  {
-    printf("SSE2 Supported: Yes\n");
-  }
-  else
-  {
-    printf("SSE2 Supported: No\n");
-  }
-#elif defined(GDT_CPUS_ARCH_AARCH64)
-  if ((features & GDT_CPUS_CPU_FEATURES_NEON) == GDT_CPUS_CPU_FEATURES_NEON)
-  {
-    printf("NEON Supported: Yes\n");
-  }
-  else
-  {
-    printf("NEON Supported: No\n");
-  }
-#endif
-
-  const char *desc_success = gdt_cpus_error_code_description(GDT_CPUS_ERROR_CODE_SUCCESS);
-  printf("Error code 0 means: %s\n", desc_success);
-
-  res = gdt_cpus_pin_thread_to_core(0);
-
-  if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
-  {
-    printf("Error pinning thread to core: %s\n", gdt_cpus_error_code_description(res));
-  }
-  else
-  {
-    printf("Thread pinned to core 0.\n");
+    GdtCpusCacheInfo l1d = {0}, l1i = {0}, l2 = {0};
+    gdt_cpus_get_l1d_cache(kinds[k], &l1d);
+    gdt_cpus_get_l1i_cache(kinds[k], &l1i);
+    gdt_cpus_get_l2_cache(kinds[k], &l2);
+    printf("  %s (%" PRIu64 " cores): L1d %" PRIu64 " KB / L1i %" PRIu64 " KB / L2 %" PRIu64
+           " KB (L2 shared by %u threads)\n",
+           gdt_cpus_core_kind_description(kinds[k]), cores_of_kind,
+           l1d.size_bytes / 1024, l1i.size_bytes / 1024, l2.size_bytes / 1024, l2.shared_by);
   }
 
-  res = gdt_cpus_set_thread_priority(GDT_CPUS_THREAD_PRIORITY_HIGHEST);
-
-  if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
+  printf("\nLogical processors:\n");
+  for (uint64_t i = 0; i < info.lp_count; ++i)
   {
-    printf("Error setting thread priority: %s\n", gdt_cpus_error_code_description(res));
-  }
-  else
-  {
-    printf("Thread priority set to GDT_CPUS_THREAD_PRIORITY_HIGHEST.\n");
+    GdtCpusLp lp = {0};
+    res = gdt_cpus_get_lp(i, &lp);
+    if (res != GDT_CPUS_ERROR_CODE_SUCCESS)
+    {
+      printf("Error retrieving LP %" PRIu64 ": %s\n", i, gdt_cpus_error_code_description(res));
+      return 1;
+    }
+    printf("  lp %3u: core %3u smt %u socket %u ", lp.os_id, lp.core, lp.smt_index, lp.socket);
+    if (lp.l3_domain == GDT_CPUS_NO_L3)
+    {
+      printf("l3-domain - ");
+    }
+    else
+    {
+      printf("l3-domain %u ", lp.l3_domain);
+    }
+    printf("numa %u perf %4u kind %s", lp.numa_node, lp.perf_hint,
+           gdt_cpus_core_kind_description(lp.kind));
+    /* Raw ARM MIDR part; 0 on x86 (no such field). Lets you tell cores of
+       different microarchitectures apart -- e.g. A720 (0x0d81) vs A520
+       (0x0d80) on a big.LITTLE chip -- without a name table. */
+    if (lp.cpu_part != 0)
+    {
+      printf(" part 0x%04x", lp.cpu_part);
+    }
+    printf("\n");
   }
 
   return 0;

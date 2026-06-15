@@ -9,12 +9,11 @@
 //! The key public items are:
 //! - The [`SchedulingPolicy`] enum itself.
 //! - The [`SchedulingPolicy::default_for()`] method to get a policy for a specific priority.
-//! - The [`SchedulingPolicy::default_mappings()`] method to get an array of all default policies.
 //!
 //! These are used by the `gdt-cpus` crate to determine how to configure thread
 //! priorities on macOS.
 
-use crate::{ThreadPriority, platform::macos::utils::u32_to_qos_class_t};
+use crate::{QosClass, ThreadPriority};
 
 /// Represents a macOS scheduling policy and its associated parameters.
 ///
@@ -33,19 +32,21 @@ pub enum SchedulingPolicy {
     /// QoS classes help the system manage resources like CPU time and power based on
     /// the importance and nature of the work.
     QoS {
-        /// The QoS class (e.g., `QOS_CLASS_USER_INTERACTIVE`, `QOS_CLASS_BACKGROUND`).
-        class: u32,
+        /// The QoS class as a stable [`QosClass`] ordinal, converted to the
+        /// darwin `qos_class_t` at the call site (a total map - no re-decoding a
+        /// raw `u32` through a parallel table that could yield `UNSPECIFIED`).
+        class: QosClass,
         /// The relative priority within the QoS class. This is an offset from the
         /// default priority of the QoS class. Negative values indicate lower priority
         /// relative to the class's default, positive values higher.
         /// For most gdt-cpus use cases, this will be 0.
         relative_priority: libc::c_int,
     },
-    /// Uses an absolute real-time priority (typically for `TH_POLICY_FIFO` or `TH_POLICY_RR`).
+    /// Uses an absolute fixed priority via `pthread_setschedparam(SCHED_RR)`.
     ///
-    /// These are used for the highest priority levels and require appropriate permissions.
-    /// The range for these priorities on macOS is typically 1 through 47 for FIFO/RR,
-    /// but system policies can affect this.
+    /// Used only by `TimeCritical`. The user band caps at 47 (`MAXPRI_USER`);
+    /// no privileges are required (unlike Linux), but per `qos.h` the call
+    /// PERMANENTLY opts the thread out of the QoS system.
     Absolute {
         /// The absolute priority value. Higher values mean higher priority.
         priority: libc::c_int,
@@ -58,74 +59,53 @@ impl SchedulingPolicy {
     /// This function maps abstract `ThreadPriority` levels to concrete macOS
     /// scheduling parameters, primarily using QoS classes.
     ///
-    /// # Examples
-    /// ```
-    /// # use gdt_cpus::SchedulingPolicy;
-    /// # use gdt_cpus::ThreadPriority;
-    /// let policy = SchedulingPolicy::default_for(ThreadPriority::Normal);
-    /// // Expected: QoS User Initiated, relative priority 0
-    /// match policy {
-    ///     SchedulingPolicy::QoS { class, relative_priority } => {
-    ///         assert_eq!(relative_priority, 0);
-    ///     },
-    ///     _ => panic!("Expected QoS policy for Normal priority"),
-    /// }
-    /// ```
+    /// NOTE(macos): the ladder is DELIBERATELY one notch "inflated" vs Apple's
+    /// nominal tier names (BelowNormal -> DEFAULT, Normal -> USER_INITIATED).
+    /// On Apple Silicon the QoS class is also the P/E-core routing lever: UTILITY
+    /// and below get routed to E-cores, DEFAULT and above stay P-eligible. An
+    /// E-core is a ~3-4x perf cliff, so mapping BelowNormal to UTILITY made
+    /// "slightly less important" work run on a different machine (measured -
+    /// too slow). Only Background/Lowest are meant to land on E-cores. Don't
+    /// "fix" this to the textbook ladder.
+    ///
+    /// NOTE(macos): the top end is QoS too, except TimeCritical. The legacy
+    /// API (pthread_setschedparam) caps at MAXPRI_USER = 47 - the SAME base
+    /// priority QoS USER_INTERACTIVE already runs at - and per qos.h it
+    /// PERMANENTLY opts the thread out of the QoS system (every later QoS
+    /// call returns EPERM). The only thing it buys is FIXED priority: no
+    /// timeshare decay while burning CPU. So AboveNormal/Highest stay inside
+    /// the QoS world (UI -4 ≈ 43 / UI 0 = 47, timeshare), and only
+    /// TimeCritical - the dedicated audio/haptics-feeder level whose threads
+    /// never come back down - takes RR 47 fixed and walks through the
+    /// one-way door knowingly.
     pub const fn default_for(priority: ThreadPriority) -> Self {
         match priority {
             ThreadPriority::Background => SchedulingPolicy::QoS {
-                class: libc::qos_class_t::QOS_CLASS_BACKGROUND as u32,
+                class: QosClass::Background,
                 relative_priority: 0,
             },
             ThreadPriority::Lowest => SchedulingPolicy::QoS {
-                class: libc::qos_class_t::QOS_CLASS_UTILITY as u32,
+                class: QosClass::Utility,
                 relative_priority: 0,
             },
             ThreadPriority::BelowNormal => SchedulingPolicy::QoS {
-                class: libc::qos_class_t::QOS_CLASS_DEFAULT as u32,
+                class: QosClass::Default,
                 relative_priority: 0,
             },
             ThreadPriority::Normal => SchedulingPolicy::QoS {
-                class: libc::qos_class_t::QOS_CLASS_USER_INITIATED as u32,
+                class: QosClass::UserInitiated,
                 relative_priority: 0,
             },
             ThreadPriority::AboveNormal => SchedulingPolicy::QoS {
-                class: libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE as u32,
+                class: QosClass::UserInteractive,
+                relative_priority: -4,
+            },
+            ThreadPriority::Highest => SchedulingPolicy::QoS {
+                class: QosClass::UserInteractive,
                 relative_priority: 0,
             },
-            // macOS real-time priorities (e.g., for pthread_setschedparam with THREAD_TIME_CONSTRAINT_POLICY)
-            // are typically in a range like 1-47 or 1-63 depending on policy and system.
-            ThreadPriority::Highest => SchedulingPolicy::Absolute { priority: 43 },
             ThreadPriority::TimeCritical => SchedulingPolicy::Absolute { priority: 47 },
         }
-    }
-
-    /// Provides a static array of default [`SchedulingPolicy`] mappings
-    /// for all [`ThreadPriority`] variants on macOS.
-    ///
-    /// The order in the array corresponds to the order of variants in `ThreadPriority`.
-    /// This is used by `affinity::get_scheduling_policies()` when no other
-    /// mappings have been set.
-    ///
-    /// # Examples
-    /// ```
-    /// # use gdt_cpus::SchedulingPolicy;
-    /// let mappings = SchedulingPolicy::default_mappings();
-    /// assert_eq!(mappings.len(), 7);
-    /// ```
-    pub const fn default_mappings() -> &'static [SchedulingPolicy; 7] {
-        // Note: This array's order must match the ThreadPriority enum order.
-        static DEFAULT_MAPPINGS: [SchedulingPolicy; 7] = [
-            SchedulingPolicy::default_for(ThreadPriority::Background),
-            SchedulingPolicy::default_for(ThreadPriority::Lowest),
-            SchedulingPolicy::default_for(ThreadPriority::BelowNormal),
-            SchedulingPolicy::default_for(ThreadPriority::Normal),
-            SchedulingPolicy::default_for(ThreadPriority::AboveNormal),
-            SchedulingPolicy::default_for(ThreadPriority::Highest),
-            SchedulingPolicy::default_for(ThreadPriority::TimeCritical),
-        ];
-
-        &DEFAULT_MAPPINGS
     }
 }
 
@@ -136,15 +116,14 @@ impl std::fmt::Display for SchedulingPolicy {
                 class,
                 relative_priority,
             } => {
-                // Using direct constants for matching as qos_class_t is often a type alias for u32 or similar
-                let qos_class_str = match u32_to_qos_class_t(*class) {
-                    libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE => "User Interactive",
-                    libc::qos_class_t::QOS_CLASS_USER_INITIATED => "User Initiated",
-                    libc::qos_class_t::QOS_CLASS_UTILITY => "Utility",
-                    libc::qos_class_t::QOS_CLASS_BACKGROUND => "Background",
-                    libc::qos_class_t::QOS_CLASS_DEFAULT => "Default",
-                    _ => "Unknown", // Or handle more gracefully if qos_class_t has other unnamed consts
+                let qos_class_str = match class {
+                    QosClass::UserInteractive => "User Interactive",
+                    QosClass::UserInitiated => "User Initiated",
+                    QosClass::Utility => "Utility",
+                    QosClass::Background => "Background",
+                    QosClass::Default => "Default",
                 };
+
                 write!(
                     f,
                     "QoS Class: {}, Relative Priority: {}",

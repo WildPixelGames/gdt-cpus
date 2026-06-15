@@ -33,15 +33,21 @@ impl SchedulingPolicy {
     /// `THREAD_PRIORITY_*` constants.
     ///
     /// # Examples
-    /// ```
-    /// # use gdt_cpus::SchedulingPolicy;
-    /// # use gdt_cpus::ThreadPriority;
-    /// # use windows::Win32::System::Threading::THREAD_PRIORITY_NORMAL;
-    /// let policy = SchedulingPolicy::default_for(ThreadPriority::Normal);
-    /// assert_eq!(policy.0, THREAD_PRIORITY_NORMAL.0);
+    /// ```rust
+    /// use gdt_cpus::{MechanismPolicy, ThreadPriority, set_thread_priority};
+    ///
+    /// let applied = set_thread_priority(ThreadPriority::Normal)?;
+    /// assert_eq!(applied.mechanism().policy, MechanismPolicy::WinPriority);
+    /// assert_eq!(applied.mechanism().value, 0);
+    /// # Ok::<(), gdt_cpus::Error>(())
     /// ```
     pub const fn default_for(priority: ThreadPriority) -> Self {
         match priority {
+            // TODO(windows): consider THREAD_MODE_BACKGROUND_BEGIN for Background -
+            // it also lowers I/O and memory priority (truer "don't disturb the
+            // game"), but it's a mode toggle: every set_thread_priority would
+            // need an unconditional BACKGROUND_END first, and Very Low I/O
+            // priority can make background loads glacial. Deferred.
             ThreadPriority::Background => SchedulingPolicy(THREAD_PRIORITY_IDLE.0),
             ThreadPriority::Lowest => SchedulingPolicy(THREAD_PRIORITY_LOWEST.0),
             ThreadPriority::BelowNormal => SchedulingPolicy(THREAD_PRIORITY_BELOW_NORMAL.0),
@@ -50,36 +56,6 @@ impl SchedulingPolicy {
             ThreadPriority::Highest => SchedulingPolicy(THREAD_PRIORITY_HIGHEST.0),
             ThreadPriority::TimeCritical => SchedulingPolicy(THREAD_PRIORITY_TIME_CRITICAL.0),
         }
-    }
-
-    /// Provides a static array of default [`SchedulingPolicy`] mappings
-    /// for all [`ThreadPriority`] variants on Windows.
-    ///
-    /// The order in the array corresponds to the order of variants in `ThreadPriority`.
-    /// This is used by `affinity::get_scheduling_policies()` when no other
-    /// mappings have been set.
-    ///
-    /// # Examples
-    /// ```
-    /// # use gdt_cpus::SchedulingPolicy;
-    /// # use windows::Win32::System::Threading::THREAD_PRIORITY_NORMAL;
-    /// let mappings = SchedulingPolicy::default_mappings();
-    /// assert_eq!(mappings.len(), 7);
-    /// assert_eq!(mappings[3].0, THREAD_PRIORITY_NORMAL.0); // Index 3 is Normal
-    /// ```
-    pub const fn default_mappings() -> &'static [SchedulingPolicy; 7] {
-        // Note: This array's order must match the ThreadPriority enum order.
-        static DEFAULT_MAPPINGS: [SchedulingPolicy; 7] = [
-            SchedulingPolicy::default_for(ThreadPriority::Background),
-            SchedulingPolicy::default_for(ThreadPriority::Lowest),
-            SchedulingPolicy::default_for(ThreadPriority::BelowNormal),
-            SchedulingPolicy::default_for(ThreadPriority::Normal),
-            SchedulingPolicy::default_for(ThreadPriority::AboveNormal),
-            SchedulingPolicy::default_for(ThreadPriority::Highest),
-            SchedulingPolicy::default_for(ThreadPriority::TimeCritical),
-        ];
-
-        &DEFAULT_MAPPINGS
     }
 }
 
@@ -96,6 +72,7 @@ impl std::fmt::Display for SchedulingPolicy {
             v if v == THREAD_PRIORITY_TIME_CRITICAL.0 => "TimeCritical",
             _ => "Unknown", // Should not happen with values from default_for
         };
+
         write!(f, "WindowsPriority({})", priority_str)
     }
 }

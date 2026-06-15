@@ -1,78 +1,55 @@
-use crate::{AffinityMask, CoreType, CpuFeatures, Result, SocketInfo, Vendor};
+use crate::{AffinityMask, CacheInfo, CoreKind, CpuFeatures, L3Domain, Lp, Result, Vendor};
 
-/// Provides a comprehensive overview of the system's CPU capabilities.
+/// The system's CPU topology and identity - a flat, by-value description.
 ///
-/// This top-level structure aggregates detailed information about the CPU,
-/// including its vendor, model, supported features, socket layout, and core details.
-/// It is designed to be the primary source of CPU information for applications
-/// using this crate.
+/// The model is per-LP records ([`Lp`]) plus first-class [`L3Domain`]s and
+/// per-kind caches. There is deliberately no socket -> core tree: a per-socket
+/// hierarchy cannot represent chiplet CPUs (a Ryzen 5950X is ONE socket with
+/// TWO 32 MiB L3 domains) and per-core cache copies only duplicate data.
+/// Socket membership lives on each `Lp`; socket totals are derived counts.
 ///
-/// The information is detected once per program execution using a platform-specific
-/// approach and then cached for subsequent calls to `gdt_cpus::cpu_info()`.
-///
-/// # Examples
-///
-/// ```
-/// // Assuming gdt_cpus::cpu_info() returns a Result<&CpuInfo, Error>
-/// if let Ok(cpu_info) = gdt_cpus::cpu_info() {
-///     println!("CPU Vendor: {}", cpu_info.vendor);
-///     println!("CPU Model: {}", cpu_info.model_name);
-///     println!("Total Physical Cores: {}", cpu_info.total_physical_cores);
-///     #[cfg(target_arch = "x86_64")]
-///     if cpu_info.features.contains(gdt_cpus::CpuFeatures::AVX2) {
-///         println!("AVX2 is supported!");
-///     }
-///     #[cfg(target_arch = "aarch64")]
-///     if cpu_info.features.contains(gdt_cpus::CpuFeatures::NEON) {
-///         println!("NEON is supported!");
-///     }
-/// }
-/// ```
+/// Obtain it with [`CpuInfo::detect()`] and store it wherever you want - the
+/// struct owns all its data and there is no global state in the library.
+#[must_use]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CpuInfo {
-    /// The manufacturer of the CPU (e.g., Intel, AMD, Apple).
+    /// One record per online logical processor.
+    pub lps: Vec<Lp>,
+    /// Physical core count (SMT siblings counted once).
+    pub core_count: u16,
+    /// Socket count (derived; sockets are not containers in this model).
+    pub socket_count: u8,
+    /// NUMA node count (1 on single-node systems and macOS).
+    pub numa_node_count: u8,
+    /// Physical cores per [`CoreKind`], indexed by [`CoreKind::index()`].
+    pub kind_core_counts: [u16; CoreKind::COUNT],
+
+    /// L3 cache domains (CCDs / clusters), content-keyed during detection.
+    pub l3_domains: Vec<L3Domain>,
+    /// L1 data cache per core kind, indexed by [`CoreKind::index()`].
+    pub l1d: [CacheInfo; CoreKind::COUNT],
+    /// L1 instruction cache per core kind.
+    pub l1i: [CacheInfo; CoreKind::COUNT],
+    /// L2 cache per core kind.
+    pub l2: [CacheInfo; CoreKind::COUNT],
+
+    /// The CPU manufacturer.
     pub vendor: Vendor,
-    /// The specific model name of the CPU as reported by the system
-    /// (e.g., "Apple M1 Pro", "Intel(R) Core(TM) i7-13700K").
+    /// Model name as reported by the system (cpuid brand string, sysctl, …).
     pub model_name: String,
-    /// A bitfield representing the set of supported CPU features and instruction sets
-    /// (e.g., SSE, AVX, NEON).
+    /// Runtime-detected ISA feature flags.
     pub features: CpuFeatures,
-
-    /// A vector containing detailed information about each physical CPU socket present in the system.
-    /// For most consumer systems, this will contain a single `SocketInfo` element.
-    pub sockets: Vec<SocketInfo>,
-
-    // Aggregated counts for convenience, derived from the `sockets` data.
-    /// Total number of physical CPU sockets in the system.
-    pub total_sockets: usize,
-    /// Total number of physical cores across all sockets. This does not count logical
-    /// processors from Hyper-Threading/SMT.
-    pub total_physical_cores: usize,
-    /// Total number of logical processors (hardware threads) across all sockets.
-    /// This includes threads from Hyper-Threading/SMT.
-    pub total_logical_processors: usize,
-    /// Total number of performance-type physical cores (e.g., P-cores) if the CPU
-    /// has a hybrid architecture or the number of physical cores otherwise.
-    pub total_performance_cores: usize,
-    /// Total number of efficiency-type physical cores (e.g., E-cores) if the CPU
-    /// has a hybrid architecture. Zero if not applicable or not detected.
-    pub total_efficiency_cores: usize,
 }
 
 impl CpuInfo {
-    /// Detects CPU information using platform-specific methods.
+    /// Detects the CPU topology using platform-specific methods.
     ///
-    /// This function is called once internally by `gdt_cpus::cpu_info()`
-    /// to initialize the static `CPU_INFO` variable. It dispatches to the
-    /// appropriate platform-specific detection logic.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the `CpuInfo` on success, or an `Error` if detection fails
-    /// or the platform is unsupported.
-    pub(crate) fn detect() -> Result<Self> {
+    /// This reads OS interfaces only (sysfs, sysctl, Win32) - no global state
+    /// is created and repeated calls are independent. Detect once at startup
+    /// and keep the value.
+    #[must_use = "detecting topology has a cost; keep and reuse the returned CpuInfo"]
+    pub fn detect() -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
             crate::platform::linux::cpu::detect_cpu_info()
@@ -87,182 +64,111 @@ impl CpuInfo {
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
-            // Explicitly return an Error for unsupported platforms.
-            Err(Error::Unsupported(
+            Err(crate::Error::Unsupported(
                 "CPU information detection is not supported on this platform.".to_string(),
             ))
         }
     }
 
-    /// Returns the total number of physical cores in the system.
-    ///
-    /// This is a convenience method equivalent to accessing `self.total_physical_cores`.
-    /// It sums the number of physical cores across all sockets.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use gdt_cpus::{CpuInfo, Vendor, CpuFeatures, SocketInfo};
-    /// # let cpu_info = CpuInfo {
-    /// #     vendor: Vendor::Unknown, model_name: String::new(), features: CpuFeatures::empty(),
-    /// #     sockets: Vec::new(), total_sockets: 0, total_physical_cores: 8,
-    /// #     total_logical_processors: 16, total_performance_cores: 4, total_efficiency_cores: 4,
-    /// # };
-    /// assert_eq!(cpu_info.num_physical_cores(), 8);
-    /// ```
+    /// Total number of physical cores (SMT siblings counted once).
     pub fn num_physical_cores(&self) -> usize {
-        self.total_physical_cores
+        self.core_count as usize
     }
 
-    /// Returns the total number of logical cores (hardware threads) in the system.
-    ///
-    /// This is a convenience method equivalent to accessing `self.total_logical_processors`.
-    /// This count includes threads from technologies like Intel's Hyper-Threading or AMD's SMT.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use gdt_cpus::{CpuInfo, Vendor, CpuFeatures, SocketInfo};
-    /// # let cpu_info = CpuInfo {
-    /// #     vendor: Vendor::Unknown, model_name: String::new(), features: CpuFeatures::empty(),
-    /// #     sockets: Vec::new(), total_sockets: 0, total_physical_cores: 8,
-    /// #     total_logical_processors: 16, total_performance_cores: 4, total_efficiency_cores: 4,
-    /// # };
-    /// assert_eq!(cpu_info.num_logical_cores(), 16);
-    /// ```
+    /// Total number of logical processors (hardware threads).
     pub fn num_logical_cores(&self) -> usize {
-        self.total_logical_processors
+        self.lps.len()
     }
 
-    /// Returns the total number of performance-type physical cores in the system.
+    /// Physical cores classified as [`CoreKind::Performance`].
     ///
-    /// This is relevant for hybrid architectures (e.g., Intel P-cores, ARM big cores).
-    /// Returns the number of physical cores if the system does not have a hybrid architecture.
-    /// This is a convenience method equivalent to accessing `self.total_performance_cores`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use gdt_cpus::{CpuInfo, Vendor, CpuFeatures, SocketInfo};
-    /// # let cpu_info = CpuInfo {
-    /// #     vendor: Vendor::Unknown, model_name: String::new(), features: CpuFeatures::empty(),
-    /// #     sockets: Vec::new(), total_sockets: 0, total_physical_cores: 8,
-    /// #     total_logical_processors: 16, total_performance_cores: 4, total_efficiency_cores: 4,
-    /// # };
-    /// assert_eq!(cpu_info.num_performance_cores(), 4);
-    /// ```
+    /// On homogeneous machines this equals `num_physical_cores()` - the
+    /// classification invariant is "homogeneous means all Performance".
     pub fn num_performance_cores(&self) -> usize {
-        self.total_performance_cores
+        self.kind_core_counts[CoreKind::Performance.index()] as usize
     }
 
-    /// Returns the total number of efficiency-type physical cores in the system.
-    ///
-    /// This is relevant for hybrid architectures (e.g., Intel E-cores, ARM LITTLE cores).
-    /// Returns 0 if the system does not have a hybrid architecture or if this information
-    /// could not be determined.
-    /// This is a convenience method equivalent to accessing `self.total_efficiency_cores`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use gdt_cpus::{CpuInfo, Vendor, CpuFeatures, SocketInfo};
-    /// # let cpu_info = CpuInfo {
-    /// #     vendor: Vendor::Unknown, model_name: String::new(), features: CpuFeatures::empty(),
-    /// #     sockets: Vec::new(), total_sockets: 0, total_physical_cores: 8,
-    /// #     total_logical_processors: 16, total_performance_cores: 4, total_efficiency_cores: 4,
-    /// # };
-    /// assert_eq!(cpu_info.num_efficiency_cores(), 4);
-    /// ```
+    /// Physical cores classified as [`CoreKind::Efficiency`]
+    /// (plus see [`CpuInfo::num_lp_efficiency_cores`] for the LP-E tier).
     pub fn num_efficiency_cores(&self) -> usize {
-        self.total_efficiency_cores
+        self.kind_core_counts[CoreKind::Efficiency.index()] as usize
     }
 
-    /// Returns `true` if the system CPU has a hybrid architecture (e.g., both P-cores and E-cores).
-    ///
-    /// This is determined by checking if both `total_performance_cores` and
-    /// `total_efficiency_cores` are greater than zero.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use gdt_cpus::{CpuInfo, Vendor, CpuFeatures, SocketInfo};
-    /// # let hybrid_cpu_info = CpuInfo {
-    /// #     vendor: Vendor::Unknown, model_name: String::new(), features: CpuFeatures::empty(),
-    /// #     sockets: Vec::new(), total_sockets: 0, total_physical_cores: 8,
-    /// #     total_logical_processors: 16, total_performance_cores: 4, total_efficiency_cores: 4,
-    /// # };
-    /// # let non_hybrid_cpu_info = CpuInfo {
-    /// #     vendor: Vendor::Unknown, model_name: String::new(), features: CpuFeatures::empty(),
-    /// #     sockets: Vec::new(), total_sockets: 0, total_physical_cores: 4,
-    /// #     total_logical_processors: 8, total_performance_cores: 4, total_efficiency_cores: 0,
-    /// # };
-    /// assert!(hybrid_cpu_info.is_hybrid());
-    /// assert!(!non_hybrid_cpu_info.is_hybrid());
-    /// ```
+    /// Physical cores classified as [`CoreKind::LpEfficiency`].
+    pub fn num_lp_efficiency_cores(&self) -> usize {
+        self.kind_core_counts[CoreKind::LpEfficiency.index()] as usize
+    }
+
+    /// `true` when more than one of the {Performance, Efficiency, LpEfficiency}
+    /// kinds is present.
     pub fn is_hybrid(&self) -> bool {
-        self.total_performance_cores > 0 && self.total_efficiency_cores > 0
+        let kinds_present = [
+            CoreKind::Performance,
+            CoreKind::Efficiency,
+            CoreKind::LpEfficiency,
+        ]
+        .iter()
+        .filter(|k| self.kind_core_counts[k.index()] > 0)
+        .count();
+        kinds_present > 1
     }
 
-    /// Returns a flat list of all OS-specific logical processor IDs in the system.
-    ///
-    /// These IDs can be used, for example, when setting thread affinity. The order
-    /// of IDs is generally not guaranteed but often follows socket and core enumeration.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use gdt_cpus::{CpuInfo, Vendor, CpuFeatures, SocketInfo, CoreInfo, CoreType};
-    /// # let core1 = CoreInfo { id: 0, socket_id: 0, core_type: CoreType::Performance, logical_processor_ids: vec![0, 1], l1_instruction_cache: None, l1_data_cache: None, l2_cache: None };
-    /// # let core2 = CoreInfo { id: 1, socket_id: 0, core_type: CoreType::Performance, logical_processor_ids: vec![2, 3], l1_instruction_cache: None, l1_data_cache: None, l2_cache: None };
-    /// # let socket0 = SocketInfo { id: 0, cores: vec![core1, core2], l3_cache: None };
-    /// # let cpu_info = CpuInfo {
-    /// #     vendor: Vendor::Unknown, model_name: String::new(), features: CpuFeatures::empty(),
-    /// #     sockets: vec![socket0], total_sockets: 1, total_physical_cores: 2,
-    /// #     total_logical_processors: 4, total_performance_cores: 2, total_efficiency_cores: 0,
-    /// # };
-    /// let ids = cpu_info.logical_processor_ids();
-    /// assert_eq!(ids, vec![0, 1, 2, 3]);
-    /// ```
+    /// All OS logical-processor ids, in detection order.
     pub fn logical_processor_ids(&self) -> Vec<usize> {
-        self.sockets
-            .iter()
-            .flat_map(|socket| {
-                socket
-                    .cores
-                    .iter()
-                    .flat_map(|core| core.logical_processor_ids.clone())
-            })
-            .collect()
+        self.lps.iter().map(|lp| lp.os_id as usize).collect()
     }
 
+    /// Mask of every online LP.
     pub fn all_cores_mask(&self) -> AffinityMask {
-        AffinityMask::from_cores(&self.logical_processor_ids())
+        self.mask_where(|_| true)
     }
 
+    /// Mask of LPs whose core is of `kind`.
+    pub fn kind_mask(&self, kind: CoreKind) -> AffinityMask {
+        self.mask_where(|lp| lp.kind == kind)
+    }
+
+    /// Mask of Performance-core LPs. Never empty: homogeneous machines are
+    /// all-Performance by the classification invariant.
     pub fn performance_core_mask(&self) -> AffinityMask {
-        self.cores_by_type_mask(CoreType::Performance)
+        self.kind_mask(CoreKind::Performance)
     }
 
+    /// Mask of Efficiency-core LPs (empty on non-hybrid machines).
     pub fn efficiency_core_mask(&self) -> AffinityMask {
-        self.cores_by_type_mask(CoreType::Efficiency)
+        self.kind_mask(CoreKind::Efficiency)
     }
 
-    pub fn cores_by_type_mask(&self, core_type: CoreType) -> AffinityMask {
-        let core_ids: Vec<usize> = self
-            .sockets
-            .iter()
-            .flat_map(|socket| {
-                socket.cores.iter().filter_map(|core| {
-                    if core.core_type == core_type {
-                        Some(core.logical_processor_ids.clone())
-                    } else {
-                        None
-                    }
-                })
-            })
-            .flatten()
-            .collect();
+    /// Mask of LpEfficiency-core LPs (empty on non-hybrid machines).
+    pub fn lp_efficiency_core_mask(&self) -> AffinityMask {
+        self.kind_mask(CoreKind::LpEfficiency)
+    }
 
-        AffinityMask::from_cores(&core_ids)
+    /// Mask with ONE LP per physical core (`smt_index == 0`) - "no SMT siblings".
+    pub fn primary_thread_mask(&self) -> AffinityMask {
+        self.mask_where(|lp| lp.smt_index == 0)
+    }
+
+    /// Mask of the LPs in L3 domain `domain` (index into [`CpuInfo::l3_domains`]).
+    pub fn l3_domain_mask(&self, domain: u8) -> AffinityMask {
+        self.l3_domains
+            .get(domain as usize)
+            .map(|d| d.mask)
+            .unwrap_or_else(AffinityMask::empty)
+    }
+
+    /// Mask of the LPs on NUMA node `node`.
+    pub fn numa_node_mask(&self, node: u8) -> AffinityMask {
+        self.mask_where(|lp| lp.numa_node == node)
+    }
+
+    fn mask_where(&self, pred: impl Fn(&Lp) -> bool) -> AffinityMask {
+        let mut mask = AffinityMask::empty();
+
+        for lp in self.lps.iter().filter(|lp| pred(lp)) {
+            mask.add(lp.os_id as usize);
+        }
+
+        mask
     }
 }

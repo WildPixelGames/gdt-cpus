@@ -1,254 +1,191 @@
 //! GDT-CPUs: Game Developer's Toolkit for CPU Management
 //!
 //! This crate provides detailed CPU information and thread management capabilities
-//! specifically designed for game developers. It aims to simplify tasks such as
-//! querying CPU features, understanding core architecture (including hybrid designs
-//! like P-cores and E-cores), and managing thread affinity and priority.
+//! specifically designed for game developers: CPU topology (including hybrid
+//! P/E/LP-E core kinds and L3 cache domains), thread affinity and thread priority.
 //!
 //! # Key Features
 //!
-//! *   **Detailed CPU Information**: Access vendor, model name, supported instruction sets
-//!     (e.g., AVX2, NEON), cache details, and core topology via the [`CpuInfo`] struct.
-//! *   **Hybrid Architecture Support**: Differentiates between performance and
-//!     efficiency cores.
-//! *   **Thread Affinity**: (Via the `affinity` module) Pin threads to specific
-//!     logical or physical cores.
-//! *   **Thread Priority**: (Via the `affinity` module) Set thread priorities for
-//!     different operating systems.
-//! *   **Platform Abstraction**: Provides a consistent API across Windows, macOS, and Linux.
-//! *   **Lazy Initialization**: CPU information is detected once and cached globally.
+//! *   **Flat topology model**: one [`Lp`] record per logical processor plus a
+//!     first-class [`L3Domain`] table - chiplet CPUs (multiple CCDs per socket)
+//!     and hybrid designs are represented faithfully.
+//! *   **Core kinds**: [`CoreKind::Performance`] / [`CoreKind::Efficiency`] /
+//!     [`CoreKind::LpEfficiency`] - modern silicon ships more than two kinds.
+//! *   **L3 cache domains**: group cooperating threads by shared L3
+//!     ([`CpuInfo::l3_domain_mask`]) - cross-domain latency is the real cliff.
+//! *   **Thread Affinity**: pin threads to logical cores or sets of them.
+//! *   **Thread Priority**: 7 portable levels mapped to each OS's scheduler.
+//! *   **No global state**: [`CpuInfo::detect()`] returns a plain value you own.
 //!
 //! # Getting Started
 //!
-//! The primary way to get CPU information is through the [`cpu_info()`] function:
-//!
 //! ```
-//! use gdt_cpus::{cpu_info, CpuInfo, Error, CpuFeatures};
+//! use gdt_cpus::CpuInfo;
 //!
-//! fn main() -> Result<(), Error> {
-//!     let info = cpu_info()?;
+//! fn main() -> Result<(), gdt_cpus::Error> {
+//!     let info = CpuInfo::detect()?;
 //!
-//!     println!("CPU Vendor: {}", info.vendor);
-//!     println!("CPU Model: {}", info.model_name);
-//!     println!("Total Physical Cores: {}", info.total_physical_cores);
-//!     println!("Total Logical Processors: {}", info.total_logical_processors);
+//!     println!("CPU: {} ({})", info.model_name, info.vendor);
+//!     println!("{} cores / {} threads", info.core_count, info.lps.len());
 //!
 //!     if info.is_hybrid() {
-//!         println!("This is a hybrid CPU with:");
-//!         println!("  Performance Cores: {}", info.total_performance_cores);
-//!         println!("  Efficiency Cores: {}", info.total_efficiency_cores);
+//!         println!("hybrid: {}P + {}E + {}LP-E",
+//!             info.num_performance_cores(),
+//!             info.num_efficiency_cores(),
+//!             info.num_lp_efficiency_cores());
 //!     }
 //!
-//!     #[cfg(target_arch = "x86_64")]
-//!     if info.features.contains(CpuFeatures::AVX2) {
-//!         println!("AVX2 is supported!");
+//!     for (i, d) in info.l3_domains.iter().enumerate() {
+//!         println!("L3 domain {}: {} MiB, {} cores", i, d.size_bytes >> 20, d.core_count);
 //!     }
-//!     #[cfg(target_arch = "aarch64")]
-//!     if info.features.contains(CpuFeatures::NEON) {
-//!         println!("NEON is supported!");
-//!     }
-//!
-//!     // You can also use helper functions:
-//!     let phys_cores = gdt_cpus::num_physical_cores()?;
-//!     println!("Physical cores (via helper): {}", phys_cores);
 //!
 //!     Ok(())
 //! }
 //! ```
 //!
+//! # Thread placement: what goes where (rules of thumb)
+//!
+//! Two independent levers exist on Linux/Windows: **placement** (affinity -
+//! WHERE a thread may run) and **priority** (WHO wins when threads compete).
+//! On macOS QoS fuses both (and Apple Silicon ignores pinning entirely), so
+//! treat affinity as best-effort and priority as the portable lever.
+//!
+//! | Work | Cores | Priority |
+//! |---|---|---|
+//! | Main / render thread | best Performance core (highest [`Lp::perf_hint`], `smt_index == 0`) | `AboveNormal`-`Highest` |
+//! | Simulation / job workers | one per remaining Performance core primary; keep cooperating sets inside ONE L3 domain | `Normal` |
+//! | Audio / haptics feeder | any Performance core - do NOT pin it onto the busiest one | `TimeCritical` (dedicate the thread; on macOS it permanently leaves the QoS system). For hard deadlines, [`promote_thread_to_realtime`] |
+//! | Asset streaming / decompression | Efficiency cores **if present** - the mask CAN be empty, always fall back to Performance | `BelowNormal` |
+//! | Shader/PSO compilation, navmesh & lighting bakes, batch processing | wherever there's room - these want throughput, not latency | `Lowest` |
+//! | Telemetry, autosave compression, platform callbacks | LpEfficiency island if present (trickle work only - these islands often have weak interconnects), else unpinned | `Background` |
+//!
+//! Further rules:
+//!
+//! *   **Don't pin everything.** Pinning removes the scheduler's freedom; it
+//!     pays off only for threads with a real reason - latency (audio, render)
+//!     or cache locality (a cooperating producer/consumer set). Leave the
+//!     rest soft. On Windows prefer [`set_thread_soft_affinity`] (CPU Sets) -
+//!     the scheduler keeps an escape hatch.
+//! *   **One heavy thread per physical core**: build worker pools from
+//!     [`CpuInfo::primary_thread_mask`] (`smt_index == 0`), not from all LPs -
+//!     two heavy threads on SMT siblings share one core's execution
+//!     resources. Siblings are fine for light helpers.
+//! *   **Group by L3, not by core id**: cross-L3-domain communication costs
+//!     multiples of in-domain (3.6× measured on a dual-CCD 5950X - run
+//!     `examples/l3_domains.rs`). Place cooperating threads with
+//!     [`CpuInfo::l3_domain_mask`]; never assume core ids imply locality.
+//! *   **Within a kind, rank with [`Lp::perf_hint`]** - chips ship Performance
+//!     tiers spanning several frequency bins (ARM prime-vs-mid, Intel favored
+//!     cores). Compare it only within the same detected machine and kind; the
+//!     source scale differs per OS. Equal hints = indistinguishable, don't
+//!     invent an order.
+//! *   **Kinds are classes, not guarantees**: a machine may have NO
+//!     Efficiency cores (only P + LP-E), or nothing but Performance. Write
+//!     fallbacks: `efficiency_core_mask()` empty -> use Performance at lower
+//!     priority.
+//! *   **Check what priority can deliver**: on a locked-down Linux box
+//!     (no rtkit, default rlimits) every level above `Normal` silently
+//!     resolves to `Normal`. [`priority_capabilities`] predicts this up
+//!     front; [`promote_thread_to_realtime`] is the explicit escape hatch
+//!     for the one thread with a hard deadline.
+//!
+//! ```no_run
+//! use gdt_cpus::{CoreKind, CpuInfo, ThreadPriority, pin_thread_to_core, set_thread_priority};
+//!
+//! # fn main() -> Result<(), gdt_cpus::Error> {
+//! let info = CpuInfo::detect()?;
+//!
+//! // Best Performance-core primaries first - render thread gets the top one.
+//! let mut p_cores: Vec<_> = info.lps.iter()
+//!     .filter(|lp| lp.kind == CoreKind::Performance && lp.smt_index == 0)
+//!     .collect();
+//!
+//! p_cores.sort_by_key(|lp| std::cmp::Reverse(lp.perf_hint));
+//!
+//! if let Some(best) = p_cores.first() {
+//!     let _ = pin_thread_to_core(best.os_id as usize); // macOS: Unsupported - fine
+//!     let applied = set_thread_priority(ThreadPriority::Highest)?;
+//!
+//!     eprintln!("render priority: {applied}");
+//! }
+//!
+//! // Background telemetry: LP-E island when it exists, otherwise just priority.
+//! let smol = info.kind_mask(CoreKind::LpEfficiency);
+//!
+//! if !smol.is_empty() {
+//!     let _ = gdt_cpus::set_thread_affinity(&smol);
+//! }
+//!
+//! let _applied = set_thread_priority(ThreadPriority::Background)?;
+//!
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Cargo Features
 //!
-//! *   `serde`: Enables serialization and deserialization of CPU information structures
-//!     (like [`CpuInfo`], [`CoreInfo`], etc.) using the Serde library.
+//! *   `rtkit` *(default)*: on Linux, negotiate priority through rtkit and
+//!     the xdg realtime portal (hand-rolled minimal D-Bus client, no extra
+//!     dependencies) when direct syscalls are denied. Opt out with
+//!     `default-features = false`.
+//! *   `serde`: serialization for the CPU information structures.
 
-// #![forbid(unsafe_code)] // Will be selectively allowed in platform-specific modules
+#![deny(missing_docs)]
 
 // Modules
 mod affinity;
 mod affinity_mask;
+mod capabilities;
 mod cpu;
 mod error;
 mod platform;
 mod priority;
+mod realtime;
 
 // Re-exports - Public API
 pub use affinity::*;
 pub use affinity_mask::AffinityMask;
-pub use cpu::{
-    CacheInfo, CacheLevel, CacheType, CoreInfo, CoreType, CpuFeatures, CpuInfo, SocketInfo, Vendor,
-};
+pub use capabilities::{PriorityCaps, priority_capabilities};
+pub use cpu::{CacheInfo, CoreKind, CpuFeatures, CpuInfo, L3Domain, Lp, Vendor};
 pub use error::{Error, Result};
-pub use platform::SchedulingPolicy;
-pub use priority::ThreadPriority;
+pub use priority::{
+    AppliedPriority, BrokerError, FallbackReason, Grant, Mechanism, MechanismPolicy, QosClass,
+    ThreadPriority,
+};
+pub use realtime::{demote_thread_from_realtime, promote_thread_to_realtime};
 
-/// Retrieves a static reference to the globally detected CPU information.
+/// Total number of physical cores (SMT siblings counted once).
 ///
-/// This function utilizes a thread-safe lazy initialization pattern. The CPU
-/// information is detected only once during the first call to this function
-/// (or any related helper function like [`num_physical_cores()`]) within the
-/// program's execution. Subsequent calls return a reference to the cached data.
-///
-/// # Returns
-///
-/// A `Result<&'static CpuInfo, Error>`. You'll typically want to handle the `Result`
-/// to access the `CpuInfo` struct.
-///
-/// # Examples
-///
-/// ```
-/// use gdt_cpus::{cpu_info, CpuInfo, Error};
-///
-/// match cpu_info() {
-///     Ok(info) => {
-///         println!("CPU Model: {}", info.model_name);
-///         println!("This system has {} physical cores.", info.num_physical_cores());
-///     }
-///     Err(e) => {
-///         eprintln!("Failed to get CPU info: {:?}", e);
-///     }
-/// }
-/// ```
-///
-/// For more direct access to the `CpuInfo` struct if successful, you might do:
-/// ```
-/// # use gdt_cpus::{cpu_info, CpuInfo, Error};
-/// # fn main() -> Result<(), Error> {
-/// let info = cpu_info()?;
-/// println!("Successfully retrieved CPU info for: {}", info.model_name);
-/// # Ok(())
-/// # }
-/// ```
-pub fn cpu_info() -> Result<&'static CpuInfo> {
-    static CPU_INFO: std::sync::OnceLock<Result<CpuInfo>> = std::sync::OnceLock::new();
-    match CPU_INFO.get_or_init(CpuInfo::detect) {
-        Ok(cpu_info) => Ok(cpu_info),
-        Err(e) => Err(e.clone()),
-    }
-}
-
-/// Returns the total number of physical cores in the system.
-///
-/// This is a convenience function that calls [`cpu_info()`] and extracts
-/// `total_physical_cores` from the [`CpuInfo`] struct.
-///
-/// # Returns
-///
-/// A `Result<usize, Error>` containing the number of physical cores on success.
-///
-/// # Examples
-///
-/// ```
-/// use gdt_cpus::num_physical_cores;
-///
-/// match num_physical_cores() {
-///     Ok(count) => println!("Number of physical cores: {}", count),
-///     Err(e) => eprintln!("Error getting physical core count: {:?}", e),
-/// }
-/// ```
+/// Convenience detection path; prefer holding a [`CpuInfo`] from
+/// [`CpuInfo::detect()`] and reading `core_count`.
 pub fn num_physical_cores() -> Result<usize> {
-    cpu_info().map(|info| info.num_physical_cores())
+    CpuInfo::detect().map(|info| info.num_physical_cores())
 }
 
-/// Returns the total number of logical cores (hardware threads) in the system.
-///
-/// This count includes threads from technologies like Intel's Hyper-Threading or AMD's SMT.
-/// This is a convenience function that calls [`cpu_info()`] and extracts
-/// `total_logical_processors` from the [`CpuInfo`] struct.
-///
-/// # Returns
-///
-/// A `Result<usize, Error>` containing the number of logical cores on success.
-///
-/// # Examples
-///
-/// ```
-/// use gdt_cpus::num_logical_cores;
-///
-/// match num_logical_cores() {
-///     Ok(count) => println!("Number of logical cores: {}", count),
-///     Err(e) => eprintln!("Error getting logical core count: {:?}", e),
-/// }
-/// ```
+/// Total number of logical processors (hardware threads).
 pub fn num_logical_cores() -> Result<usize> {
-    cpu_info().map(|info| info.num_logical_cores())
+    CpuInfo::detect().map(|info| info.num_logical_cores())
 }
 
-/// Returns the total number of performance-type physical cores in the system.
+/// Number of physical cores classified as Performance.
 ///
-/// This is relevant for hybrid architectures (e.g., Intel P-cores, ARM big cores).
-/// Returns number of physical cores if the system does not have a hybrid architecture.
-/// This is a convenience function that calls [`cpu_info()`] and extracts
-/// `total_performance_cores` from the [`CpuInfo`] struct.
-///
-/// # Returns
-///
-/// A `Result<usize, Error>` containing the number of performance cores on success.
-///
-/// # Examples
-///
-/// ```
-/// use gdt_cpus::num_performance_cores;
-///
-/// match num_performance_cores() {
-///     Ok(count) => println!("Number of performance cores: {}", count),
-///     Err(e) => eprintln!("Error getting performance core count: {:?}", e),
-/// }
-/// ```
+/// Equals `num_physical_cores()` on homogeneous machines (the classification
+/// invariant: homogeneous means all Performance).
 pub fn num_performance_cores() -> Result<usize> {
-    cpu_info().map(|info| info.num_performance_cores())
+    CpuInfo::detect().map(|info| info.num_performance_cores())
 }
 
-/// Returns the total number of efficiency-type physical cores in the system.
-///
-/// This is relevant for hybrid architectures (e.g., Intel E-cores, ARM LITTLE cores).
-/// Returns 0 if the system does not have a hybrid architecture or if this information
-/// could not be determined.
-/// This is a convenience function that calls [`cpu_info()`] and extracts
-/// `total_efficiency_cores` from the [`CpuInfo`] struct.
-///
-/// # Returns
-///
-/// A `Result<usize, Error>` containing the number of efficiency cores on success.
-///
-/// # Examples
-///
-/// ```
-/// use gdt_cpus::num_efficiency_cores;
-///
-/// match num_efficiency_cores() {
-///     Ok(count) => println!("Number of efficiency cores: {}", count),
-///     Err(e) => eprintln!("Error getting efficiency core count: {:?}", e),
-/// }
-/// ```
+/// Number of physical cores classified as Efficiency (0 on non-hybrid machines).
 pub fn num_efficiency_cores() -> Result<usize> {
-    cpu_info().map(|info| info.num_efficiency_cores())
+    CpuInfo::detect().map(|info| info.num_efficiency_cores())
 }
 
-/// Returns `true` if the system CPU has a hybrid architecture (e.g., both P-cores and E-cores).
-///
-/// This is determined by checking if both `total_performance_cores` and
-/// `total_efficiency_cores` (from [`CpuInfo`]) are greater than zero.
-/// This is a convenience function that calls [`cpu_info()`].
-///
-/// # Returns
-///
-/// A `Result<bool, Error>` which is `Ok(true)` if hybrid, `Ok(false)` if not, or an `Err`
-/// if CPU information could not be obtained.
-///
-/// # Examples
-///
-/// ```
-/// use gdt_cpus::is_hybrid;
-///
-/// match is_hybrid() {
-///     Ok(hybrid) => if hybrid {
-///         println!("This system has a hybrid CPU architecture.");
-///     } else {
-///         println!("This system does not have a hybrid CPU architecture.");
-///     }
-///     Err(e) => eprintln!("Error determining if CPU is hybrid: {:?}", e),
-/// }
-/// ```
+/// Number of physical cores classified as LpEfficiency (0 on non-hybrid machines).
+pub fn num_lp_efficiency_cores() -> Result<usize> {
+    CpuInfo::detect().map(|info| info.num_lp_efficiency_cores())
+}
+
+/// `true` if more than one core kind is present (P/E/LP-E).
 pub fn is_hybrid() -> Result<bool> {
-    cpu_info().map(|info| info.is_hybrid())
+    CpuInfo::detect().map(|info| info.is_hybrid())
 }

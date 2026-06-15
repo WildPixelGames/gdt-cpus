@@ -1,36 +1,18 @@
-use super::{CacheLevel, CacheType};
-
-/// Represents detailed information about a specific CPU cache.
+/// Size, line size and sharing degree of one cache instance.
 ///
-/// This structure provides insights into the cache's characteristics,
-/// such as its level in the memory hierarchy, its designated type
-/// (e.g., for data or instructions), its total size, and the size
-/// of its cache lines. This information is crucial for performance-sensitive
-/// applications that need to optimize memory access patterns.
-#[derive(Debug, Clone, Copy)]
+/// The library stores caches per CORE KIND (L1d/L1i/L2 are uniform within a
+/// kind on all shipping silicon) and per L3 DOMAIN - never per core, which
+/// only duplicates identical data, and never per socket, which cannot
+/// represent chiplet parts. Cache level/type enums remain internal parsing
+/// vocabulary for the platform detectors.
+#[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CacheInfo {
-    /// The hierarchical level of the cache (e.g., L1, L2, L3).
-    ///
-    /// Lower levels (like L1) are smaller, faster, and closer to the CPU core,
-    /// while higher levels (like L3) are larger, slower, and typically shared
-    /// among multiple cores.
-    pub level: CacheLevel,
-    /// The designated purpose of the cache.
-    ///
-    /// This can be:
-    /// - `Data`: Cache dedicated to storing data.
-    /// - `Instruction`: Cache dedicated to storing executable instructions.
-    /// - `Unified`: Cache used for both data and instructions.
-    pub cache_type: CacheType,
-    /// The total size of the cache, expressed in bytes.
-    ///
-    /// For example, a value of `32768` would represent a 32KB cache.
+    /// Total size in bytes. 0 = not detected.
     pub size_bytes: u64,
-    /// The size of a single cache line (also known as a cache block), in bytes.
-    ///
-    /// Data is transferred between the cache and main memory in units of cache lines.
-    /// Knowing the line size can be important for optimizing data layout to avoid
-    /// issues like false sharing in multi-threaded applications.
-    pub line_size_bytes: usize,
+    /// Cache line size in bytes (typically 64).
+    pub line_bytes: u16,
+    /// Number of LPs sharing ONE instance of this cache
+    /// (2 = core-private with SMT; >2 = cluster-shared, e.g. Intel E-core L2).
+    pub shared_by: u16,
 }

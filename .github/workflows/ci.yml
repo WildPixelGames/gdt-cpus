@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  RUST_BACKTRACE: short
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-linux-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-linux-
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+      - name: Test doctests explicitly
+        run: cargo test --doc --workspace --all-features
+
+      - name: Compile examples
+        run: cargo test --examples --all-features --no-run
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Reject ignored doctests
+        run: |
+          if grep -RInE '```[^`[:space:]]*ignore|```ignore' crates docs README.md; then
+            echo "error: ignored doctest fence found" >&2
+            exit 1
+          fi
+
+  cross-targets:
+    name: Cross-target check
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+          - aarch64-apple-darwin
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Check gdt-cpus
+        run: cargo check -p gdt-cpus --target ${{ matrix.target }} --all-features
+        env:
+          RUSTFLAGS: ""
+
+      - name: Check gdt-cpus-sys
+        run: cargo check -p gdt-cpus-sys --target ${{ matrix.target }} --all-features
+        env:
+          RUSTFLAGS: ""
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-windows-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+      - name: Test doctests explicitly
+        run: cargo test --doc --workspace --all-features
+
+  macos:
+    name: macOS Apple Silicon
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-macos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-macos-
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+      - name: Test doctests explicitly
+        run: cargo test --doc --workspace --all-features

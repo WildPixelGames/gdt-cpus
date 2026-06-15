@@ -5,10 +5,8 @@
 //! It relies on the `raw_cpuid` crate to perform these low-level queries.
 //!
 //! The functions here are `pub(crate)` and are intended to be used by the
-//! platform-specific modules (e.g., `linux.rs`, `windows.rs`, `macos.rs`)
-//! when they are compiled for an x86_64 target.
-
-use log::debug;
+//! platform-specific modules (e.g., `linux.rs`, `windows.rs`) when they are
+//! compiled for an x86_64 target.
 
 use crate::{CpuFeatures, Vendor};
 
@@ -48,6 +46,9 @@ pub(crate) fn detect_features_via_cpuid(features: &mut CpuFeatures) {
         }
         if fi.has_sse42() {
             features.insert(CpuFeatures::SSE4_2);
+            // NOTE(x86): CRC32 instructions are part of SSE4.2 - no separate
+            // cpuid bit; without this they are never reported on x86.
+            features.insert(CpuFeatures::CRC32);
         }
         if fi.has_avx() {
             features.insert(CpuFeatures::AVX);
@@ -57,6 +58,12 @@ pub(crate) fn detect_features_via_cpuid(features: &mut CpuFeatures) {
         }
         if fi.has_fma() {
             features.insert(CpuFeatures::FMA3);
+        }
+        if fi.has_popcnt() {
+            features.insert(CpuFeatures::POPCNT);
+        }
+        if fi.has_f16c() {
+            features.insert(CpuFeatures::F16C);
         }
     }
 
@@ -83,6 +90,12 @@ pub(crate) fn detect_features_via_cpuid(features: &mut CpuFeatures) {
         if ext_fi.has_avx512vl() {
             features.insert(CpuFeatures::AVX512VL);
         }
+        if ext_fi.has_bmi1() {
+            features.insert(CpuFeatures::BMI1);
+        }
+        if ext_fi.has_bmi2() {
+            features.insert(CpuFeatures::BMI2);
+        }
     }
 }
 
@@ -102,22 +115,20 @@ pub(crate) fn detect_via_cpuid(
     model_name: &mut String,
     features: &mut CpuFeatures,
 ) {
-    debug!("Attempting to use raw-cpuid for x86_64 vendor, model, and features.");
     let cpuid = raw_cpuid::CpuId::new();
 
     if let Some(vf) = cpuid.get_vendor_info() {
         let vendor_str = vf.as_str();
-        debug!("CPUID Vendor: {}", vendor_str);
+
         *vendor = match vendor_str {
             "GenuineIntel" => Vendor::Intel,
             "AuthenticAMD" => Vendor::Amd,
-            _ => Vendor::Other(vendor_str.to_string()),
+            _ => Vendor::Other,
         };
     }
 
     if let Some(pbs) = cpuid.get_processor_brand_string() {
         *model_name = pbs.as_str().trim().to_string();
-        debug!("CPUID Model Name: {}", model_name);
     } else if let Some(fi) = cpuid.get_feature_info() {
         *model_name = format!(
             "Family {} Model {} Stepping {}",
@@ -125,10 +136,8 @@ pub(crate) fn detect_via_cpuid(
             fi.model_id(),
             fi.stepping_id()
         );
-        debug!("CPUID Model Name (fallback): {}", model_name);
     } else {
         *model_name = "Unknown x86_64".to_string();
-        debug!("CPUID Model Name: Could not determine.");
     }
 
     detect_features_via_cpuid(features);
