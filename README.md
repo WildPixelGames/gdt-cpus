@@ -5,7 +5,7 @@
 <p align="center">
   <a href="#-quick-flex"><img src="https://img.shields.io/badge/Rust-E57324?style=for-the-badge&logo=rust&logoColor=white" alt="Rust"></a>
   <a href="https://crates.io/crates/gdt-cpus"><img src="https://img.shields.io/crates/v/gdt-cpus.svg?style=for-the-badge&color=orange"></a>
-  <a href="https://docs.rs/gdt-cpus"><img src="https://img.shields.io/badge/docs-rs-online-orange.svg?style=for-the-badge"></a>
+  <a href="https://docs.rs/gdt-cpus"><img src="https://img.shields.io/badge/docs_rs-online-orange.svg?style=for-the-badge"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-orange?style=for-the-badge"></a>
 </p>
 
