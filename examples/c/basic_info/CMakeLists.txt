@@ -8,7 +8,7 @@ include(FetchContent)
 
 FetchContent_Declare(
     gdt_cpus_sys_dep
-    GIT_REPOSITORY https://github.com/WildPixelGames/gdt-cpus.git
+    GIT_REPOSITORY https://github.com/gdt-tools/gdt-cpus-rs.git
     SOURCE_SUBDIR crates/gdt-cpus-sys
 )
 
