@@ -3,7 +3,17 @@ name: CI
 on:
   push:
     branches: [master, main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE-*"
+      - "NOTICE"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE-*"
+      - "NOTICE"
   workflow_call:
 
 env:
