@@ -426,6 +426,17 @@ impl FromIterator<usize> for AffinityMask {
     }
 }
 
+impl Extend<usize> for AffinityMask {
+    fn extend<Iter>(&mut self, iter: Iter)
+    where
+        Iter: IntoIterator<Item = usize>,
+    {
+        for core in iter {
+            self.add(core);
+        }
+    }
+}
+
 impl IntoIterator for &AffinityMask {
     type Item = usize;
     type IntoIter = std::vec::IntoIter<usize>;
@@ -513,6 +524,13 @@ mod tests {
         assert!(mask.contains(0));
         assert!(mask.contains(2));
         assert!(mask.contains(4));
+    }
+
+    #[test]
+    fn test_extend() {
+        let mut mask = AffinityMask::from_iter([0, 2, 4]);
+        mask.extend([1, 3]);
+        assert_eq!(mask, AffinityMask::from_iter([0, 1, 2, 3, 4]));
     }
 
     // A fixed backing array makes equality canonical: add-then-remove of a
