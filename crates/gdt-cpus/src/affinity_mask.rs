@@ -366,35 +366,6 @@ impl AffinityMask {
 
 impl std::fmt::Debug for AffinityMask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        struct Ranges<'a>(&'a AffinityMask);
-
-        impl std::fmt::Debug for Ranges<'_> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let mut iter = self.0.iter().peekable();
-                let mut first = true;
-
-                while let Some(start) = iter.next() {
-                    let mut end = start;
-                    while iter.peek() == Some(&(end + 1)) {
-                        end = iter.next().unwrap();
-                    }
-
-                    if !first {
-                        write!(f, ", ")?;
-                    }
-                    first = false;
-
-                    if start == end {
-                        write!(f, "{start}")?;
-                    } else {
-                        write!(f, "{start}-{end}")?;
-                    }
-                }
-
-                Ok(())
-            }
-        }
-
         f.debug_struct("AffinityMask")
             .field("cores", &Ranges(self))
             .field("count", &self.count())
@@ -404,13 +375,43 @@ impl std::fmt::Debug for AffinityMask {
 
 impl std::fmt::Display for AffinityMask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let cores: Vec<usize> = self.iter().collect();
-
-        if cores.is_empty() {
+        if self.is_empty() {
             write!(f, "AffinityMask(empty)")
         } else {
-            write!(f, "AffinityMask({:?})", cores)
+            write!(f, "AffinityMask({:?})", Ranges(self))
         }
+    }
+}
+
+/// Formats the set core ids as a bracketed, comma-separated range list:
+/// `[]`, `[5]`, `[0-3]`, `[0-3, 6-9, 15]`. Relies on [`AffinityMask::iter`]
+/// yielding ids in ascending order, so consecutive runs coalesce into `a-b`.
+struct Ranges<'a>(&'a AffinityMask);
+
+impl std::fmt::Debug for Ranges<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut iter = self.0.iter().peekable();
+        let mut first = true;
+
+        write!(f, "[")?;
+        while let Some(start) = iter.next() {
+            let mut end = start;
+            while iter.peek() == Some(&(end + 1)) {
+                end = iter.next().unwrap();
+            }
+
+            if !first {
+                write!(f, ", ")?;
+            }
+            first = false;
+
+            if start == end {
+                write!(f, "{start}")?;
+            } else {
+                write!(f, "{start}-{end}")?;
+            }
+        }
+        write!(f, "]")
     }
 }
 
@@ -543,5 +544,57 @@ mod tests {
         mask.add(u32::MAX as usize); // far out of range
         assert!(!mask.contains(AffinityMask::MAX_LP_COUNT));
         assert_eq!(mask.count(), 1);
+    }
+
+    // Debug renders cores as a bracketed range list; the brackets keep an
+    // empty mask from formatting as a blank field and keep multi-range output
+    // from blurring into the trailing `count` field.
+    #[test]
+    fn test_debug_format() {
+        assert_eq!(
+            format!("{:?}", AffinityMask::empty()),
+            "AffinityMask { cores: [], count: 0 }"
+        );
+        assert_eq!(
+            format!("{:?}", AffinityMask::single(5)),
+            "AffinityMask { cores: [5], count: 1 }"
+        );
+        assert_eq!(
+            format!("{:?}", AffinityMask::from_cores(&[0, 1, 2, 3])),
+            "AffinityMask { cores: [0-3], count: 4 }"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                AffinityMask::from_cores(&[0, 1, 2, 3, 6, 7, 8, 9, 15])
+            ),
+            "AffinityMask { cores: [0-3, 6-9, 15], count: 9 }"
+        );
+    }
+
+    // A run that straddles the bits[0]/bits[1] u64 word split (63|64|65) must
+    // still coalesce, and 1023 is the max id, so `end + 1 == 1024` exercises
+    // the no-overflow edge of the range-extension loop.
+    #[test]
+    fn test_debug_format_word_boundary_and_max_id() {
+        assert_eq!(
+            format!("{:?}", AffinityMask::from_cores(&[63, 64, 65, 1023])),
+            "AffinityMask { cores: [63-65, 1023], count: 4 }"
+        );
+    }
+
+    // Display shares the range formatter for non-empty masks (so it renders the
+    // compact form too), but keeps the human-readable `empty` word for the empty
+    // case rather than `([])`.
+    #[test]
+    fn test_display_format() {
+        assert_eq!(
+            format!(
+                "{}",
+                AffinityMask::from_cores(&[0, 1, 2, 3, 6, 7, 8, 9, 15])
+            ),
+            "AffinityMask([0-3, 6-9, 15])"
+        );
+        assert_eq!(format!("{}", AffinityMask::empty()), "AffinityMask(empty)");
     }
 }
