@@ -375,11 +375,10 @@ impl std::fmt::Debug for AffinityMask {
 
 impl std::fmt::Display for AffinityMask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_empty() {
-            write!(f, "AffinityMask(empty)")
-        } else {
-            write!(f, "AffinityMask({:?})", Ranges(self))
-        }
+        // Display is the value, not the type: a bare range list (`[0-3, 6-9]`,
+        // `[]`), the way a slice renders. The `AffinityMask { .. }` decoration
+        // is Debug's job.
+        write!(f, "{:?}", Ranges(self))
     }
 }
 
@@ -583,9 +582,9 @@ mod tests {
         );
     }
 
-    // Display shares the range formatter for non-empty masks (so it renders the
-    // compact form too), but keeps the human-readable `empty` word for the empty
-    // case rather than `([])`.
+    // Display is the bare value -- the range list with no `AffinityMask(...)`
+    // wrapper (that decoration is Debug's), the way a slice renders: `[0-3]`,
+    // `[]`.
     #[test]
     fn test_display_format() {
         assert_eq!(
@@ -593,8 +592,8 @@ mod tests {
                 "{}",
                 AffinityMask::from_cores(&[0, 1, 2, 3, 6, 7, 8, 9, 15])
             ),
-            "AffinityMask([0-3, 6-9, 15])"
+            "[0-3, 6-9, 15]"
         );
-        assert_eq!(format!("{}", AffinityMask::empty()), "AffinityMask(empty)");
+        assert_eq!(format!("{}", AffinityMask::empty()), "[]");
     }
 }
