@@ -366,11 +366,38 @@ impl AffinityMask {
 
 impl std::fmt::Debug for AffinityMask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let cores: Vec<usize> = self.iter().collect();
+        struct Ranges<'a>(&'a AffinityMask);
+
+        impl std::fmt::Debug for Ranges<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut iter = self.0.iter().peekable();
+                let mut first = true;
+
+                while let Some(start) = iter.next() {
+                    let mut end = start;
+                    while iter.peek() == Some(&(end + 1)) {
+                        end = iter.next().unwrap();
+                    }
+
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+
+                    if start == end {
+                        write!(f, "{start}")?;
+                    } else {
+                        write!(f, "{start}-{end}")?;
+                    }
+                }
+
+                Ok(())
+            }
+        }
 
         f.debug_struct("AffinityMask")
-            .field("cores", &cores)
-            .field("count", &cores.len())
+            .field("cores", &Ranges(self))
+            .field("count", &self.count())
             .finish()
     }
 }
