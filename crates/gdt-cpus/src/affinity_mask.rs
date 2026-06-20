@@ -417,11 +417,7 @@ impl std::fmt::Debug for Ranges<'_> {
 impl FromIterator<usize> for AffinityMask {
     fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
         let mut mask = AffinityMask::empty();
-
-        for id in iter {
-            mask.add(id);
-        }
-
+        mask.extend(iter);
         mask
     }
 }
@@ -529,7 +525,8 @@ mod tests {
     #[test]
     fn test_extend() {
         let mut mask = AffinityMask::from_iter([0, 2, 4]);
-        mask.extend([1, 3]);
+        // The out-of-range id is silently dropped, same as `add`.
+        mask.extend([1, 3, AffinityMask::MAX_LP_COUNT]);
         assert_eq!(mask, AffinityMask::from_iter([0, 1, 2, 3, 4]));
     }
 
