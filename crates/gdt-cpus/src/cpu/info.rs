@@ -188,4 +188,46 @@ impl CpuInfo {
 
         mask
     }
+
+    /// Sorts the L3 and L2 domain tables by ascending lowest member LP and
+    /// remaps every `Lp`'s domain index to match - the order
+    /// [`l3_domains`](Self::l3_domains) / [`l2_domains`](Self::l2_domains) promise.
+    ///
+    /// Detection appends domains in platform-iteration order. On a sparse online
+    /// set (a cpuset-limited container, say) a domain's lowest member can be an
+    /// offline LP that its `shared_cpu_list` still names, so iteration order and
+    /// lowest-member order disagree; this restores the contract. Stable - an
+    /// already-ascending table is left untouched.
+    pub(crate) fn normalize_domain_order(&mut self) {
+        let l3_remap = sort_domains_by_lowest_lp(&mut self.l3_domains, |d| &d.mask);
+        let l2_remap = sort_domains_by_lowest_lp(&mut self.l2_domains, |d| &d.mask);
+
+        for lp in &mut self.lps {
+            if lp.l3_domain != Lp::NO_L3 {
+                lp.l3_domain = l3_remap[lp.l3_domain as usize] as u8;
+            }
+            if lp.l2_domain != Lp::NO_L2 {
+                lp.l2_domain = l2_remap[lp.l2_domain as usize] as u16;
+            }
+        }
+    }
+}
+
+/// Sorts `domains` by ascending lowest member LP and returns the old-to-new
+/// index `remap` (`remap[old] == new`). Stable, so an already-sorted table is
+/// untouched and its remap is the identity.
+fn sort_domains_by_lowest_lp<D: Clone>(
+    domains: &mut Vec<D>,
+    mask_of: impl Fn(&D) -> &AffinityMask,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..domains.len()).collect();
+    order.sort_by_key(|&i| mask_of(&domains[i]).iter().next().unwrap_or(usize::MAX));
+
+    let mut remap = vec![0usize; domains.len()];
+    for (new_idx, &old_idx) in order.iter().enumerate() {
+        remap[old_idx] = new_idx;
+    }
+
+    *domains = order.iter().map(|&i| domains[i].clone()).collect();
+    remap
 }

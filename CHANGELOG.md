@@ -28,6 +28,14 @@ The Rust API is additive (no changes needed); the C ABI is a recompile.
 - `impl Extend<usize> for AffinityMask`; `FromIterator` now delegates to it, and
   out-of-range ids (`>= MAX_LP_COUNT`) are silently dropped (#11).
 
+### 🐛 Bug Fixes
+
+- Normalize L3 and L2 domain order: both tables are sorted by ascending lowest
+  member LP and every `Lp`'s domain index is remapped to match. On a sparse
+  online set - e.g. a cpuset-limited container whose cache `shared_cpu_list`
+  still names offline siblings - detection could otherwise emit the domains out
+  of the documented order.
+
 ### 🚜 Refactor
 
 - `AffinityMask` `Debug` and `Display` now render logical-processor sets as

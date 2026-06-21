@@ -430,7 +430,7 @@ pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
         }
     }
 
-    Ok(CpuInfo {
+    let mut info = CpuInfo {
         lps,
         core_count: next_core as u16,
         socket_count: socket_count as u8,
@@ -444,7 +444,9 @@ pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
         vendor,
         model_name,
         features,
-    })
+    };
+    info.normalize_domain_order();
+    Ok(info)
 }
 
 /// Fixture-driven macOS detection tests - these run on EVERY platform, which

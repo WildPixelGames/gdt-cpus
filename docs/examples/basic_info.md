@@ -142,18 +142,28 @@ Hybrid architecture: No
 
 L3 domains: 0
 
+L2 domains: 8
+  domain 0: 4096 KB, 1 cores, 1 threads, l3-domain -, lps [0]
+  domain 1: 4096 KB, 1 cores, 1 threads, l3-domain -, lps [1]
+  domain 2: 4096 KB, 1 cores, 1 threads, l3-domain -, lps [2]
+  domain 3: 4096 KB, 1 cores, 1 threads, l3-domain -, lps [3]
+  domain 4: 4096 KB, 1 cores, 1 threads, l3-domain -, lps [4]
+  domain 5: 4096 KB, 1 cores, 1 threads, l3-domain -, lps [5]
+  domain 6: 4096 KB, 1 cores, 1 threads, l3-domain -, lps [6]
+  domain 7: 4096 KB, 1 cores, 1 threads, l3-domain -, lps [7]
+
 Per-kind caches:
   Performance: L1d 64 KB / L1i 128 KB / L2 4096 KB (L2 shared by 1 threads)
 
 Logical processors:
-  lp   0: core   0 smt 0 socket 0 l3-domain - numa 0 perf    0 kind Performance
-  lp   1: core   1 smt 0 socket 1 l3-domain - numa 0 perf    0 kind Performance
-  lp   2: core   2 smt 0 socket 2 l3-domain - numa 0 perf    0 kind Performance
-  lp   3: core   3 smt 0 socket 3 l3-domain - numa 0 perf    0 kind Performance
-  lp   4: core   4 smt 0 socket 4 l3-domain - numa 0 perf    0 kind Performance
-  lp   5: core   5 smt 0 socket 5 l3-domain - numa 0 perf    0 kind Performance
-  lp   6: core   6 smt 0 socket 6 l3-domain - numa 0 perf    0 kind Performance
-  lp   7: core   7 smt 0 socket 7 l3-domain - numa 0 perf    0 kind Performance
+  lp   0: core   0 smt 0 socket 0 l3-domain - l2-domain 0 numa 0 perf    0 kind Performance
+  lp   1: core   1 smt 0 socket 1 l3-domain - l2-domain 1 numa 0 perf    0 kind Performance
+  lp   2: core   2 smt 0 socket 2 l3-domain - l2-domain 2 numa 0 perf    0 kind Performance
+  lp   3: core   3 smt 0 socket 3 l3-domain - l2-domain 3 numa 0 perf    0 kind Performance
+  lp   4: core   4 smt 0 socket 4 l3-domain - l2-domain 4 numa 0 perf    0 kind Performance
+  lp   5: core   5 smt 0 socket 5 l3-domain - l2-domain 5 numa 0 perf    0 kind Performance
+  lp   6: core   6 smt 0 socket 6 l3-domain - l2-domain 6 numa 0 perf    0 kind Performance
+  lp   7: core   7 smt 0 socket 7 l3-domain - l2-domain 7 numa 0 perf    0 kind Performance
 
 CPU Features:
   NEON, AES, SHA, CRC32, FP16, DOTPROD, BF16, LSE, JSCVT, LRCPC, PMULL
@@ -353,15 +363,15 @@ L3 domains: 1
   domain 0: 8 MiB, 2 cores, 8 threads, lps [0-7]
 
 L2 domains: 2
-  domain 0: 256 KB, 1 cores, 2 threads, l3-domain 0, lps [1, 5]
-  domain 1: 256 KB, 1 cores, 2 threads, l3-domain 0, lps [0, 4]
+  domain 0: 256 KB, 1 cores, 2 threads, l3-domain 0, lps [0, 4]
+  domain 1: 256 KB, 1 cores, 2 threads, l3-domain 0, lps [1, 5]
 
 Per-kind caches:
   Performance: L1d 32 KB / L1i 32 KB / L2 256 KB (L2 shared by 2 threads)
 
 Logical processors:
-  lp   1: core   0 smt 0 socket 0 l3-domain 0 l2-domain 0 numa 0 perf 1024 kind Performance
-  lp   4: core   1 smt 0 socket 0 l3-domain 0 l2-domain 1 numa 0 perf 1024 kind Performance
+  lp   1: core   0 smt 0 socket 0 l3-domain 0 l2-domain 1 numa 0 perf 1024 kind Performance
+  lp   4: core   1 smt 0 socket 0 l3-domain 0 l2-domain 0 numa 0 perf 1024 kind Performance
 
 CPU Features:
   MMX, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, FMA3, AVX, AVX2, AES, CRC32, POPCNT, BMI1, BMI2, F16C

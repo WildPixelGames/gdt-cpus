@@ -535,7 +535,7 @@ fn build_cpu_info(
         }
     }
 
-    Ok(CpuInfo {
+    let mut info = CpuInfo {
         lps,
         core_count,
         socket_count,
@@ -549,7 +549,9 @@ fn build_cpu_info(
         vendor,
         model_name,
         features,
-    })
+    };
+    info.normalize_domain_order();
+    Ok(info)
 }
 
 #[cfg(target_arch = "aarch64")]

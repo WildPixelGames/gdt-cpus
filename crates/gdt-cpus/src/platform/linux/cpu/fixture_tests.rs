@@ -70,6 +70,15 @@ fn fixture_numa2_disjoint_nodes_survive() {
 }
 
 #[test]
+fn fixture_i7_6700_lxc_sparse_online() {
+    // cpuset-limited LXC (online = "1,4") whose L2 shared_cpu_list still names
+    // the offline host siblings (cpu1 -> "1,5", cpu4 -> "0,4"). A domain's
+    // lowest member can be an offline lp, so detection's append order inverts
+    // the ascending-lowest-lp contract; this guards the post-sort normalization.
+    run_fixture("sysfs-i7-6700-lxc");
+}
+
+#[test]
 fn fixture_numa_sparse_node_ids() {
     // Sparse node ids (node1 absent): guards the break-on-first-gap bug that
     // counted only contiguous nodes and stranded later-node LPs on node 0.

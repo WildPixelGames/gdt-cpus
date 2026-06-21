@@ -514,7 +514,7 @@ pub(crate) fn detect_at(sysfs_root: &Path, procfs_root: &Path) -> Result<CpuInfo
         }
     }
 
-    Ok(CpuInfo {
+    let mut info = CpuInfo {
         lps,
         core_count,
         socket_count,
@@ -528,5 +528,7 @@ pub(crate) fn detect_at(sysfs_root: &Path, procfs_root: &Path) -> Result<CpuInfo
         vendor,
         model_name,
         features: cpu_features,
-    })
+    };
+    info.normalize_domain_order();
+    Ok(info)
 }
