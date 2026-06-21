@@ -31,7 +31,8 @@ use windows::Win32::System::Threading::{
 };
 
 use crate::{
-    AffinityMask, CacheInfo, CoreKind, CpuFeatures, CpuInfo, Error, L3Domain, Lp, Result, Vendor,
+    AffinityMask, CacheInfo, CoreKind, CpuFeatures, CpuInfo, Error, L2Domain, L3Domain, Lp, Result,
+    Vendor,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -330,6 +331,7 @@ fn build_cpu_info(
                 core: core_idx as u16,
                 socket,
                 l3_domain: Lp::NO_L3,
+                l2_domain: Lp::NO_L2,
                 numa_node: 0,
                 kind,
                 smt_index: sibling as u8,
@@ -400,6 +402,65 @@ fn build_cpu_info(
     for lp in &lps {
         if lp.smt_index == 0 && lp.l3_domain != Lp::NO_L3 {
             l3_domains[lp.l3_domain as usize].core_count += 1;
+        }
+    }
+
+    // --- Phase 2c-bis: L2 domains, content-keyed by lowest member LP ---
+    let mut l2_domains: Vec<L2Domain> = Vec::new();
+    let mut l2_first_lp: Vec<u16> = Vec::new();
+
+    for cache in raw
+        .caches
+        .iter()
+        .filter(|c| c.level == CacheLevel::L2 && c.cache_type == CacheType::Unified)
+    {
+        let Some(&first) = cache.lp_ids.first() else {
+            continue;
+        };
+
+        let domain = match l2_first_lp.iter().position(|&k| k == first) {
+            Some(d) => d,
+            None => {
+                // Cap BEFORE pushing: NO_L2 (0xFFFF) is the sentinel.
+                if l2_domains.len() >= Lp::NO_L2 as usize {
+                    continue;
+                }
+
+                let mut mask = AffinityMask::empty();
+                for &id in &cache.lp_ids {
+                    mask.add(id as usize);
+                }
+
+                // Every member shares one L3; take it from the lowest member,
+                // already stamped by phase 2c.
+                let l3_domain = lps
+                    .iter()
+                    .find(|lp| lp.os_id == first)
+                    .map_or(Lp::NO_L3, |lp| lp.l3_domain);
+
+                l2_first_lp.push(first);
+
+                l2_domains.push(L2Domain {
+                    size_bytes: cache.size_bytes,
+                    mask,
+                    core_count: 0,
+                    l3_domain,
+                });
+
+                l2_domains.len() - 1
+            }
+        };
+
+        for lp in lps.iter_mut() {
+            if cache.lp_ids.binary_search(&lp.os_id).is_ok() {
+                lp.l2_domain = domain as u16;
+            }
+        }
+    }
+
+    for lp in &lps {
+        if lp.smt_index == 0 && lp.l2_domain != Lp::NO_L2 {
+            l2_domains[lp.l2_domain as usize].core_count += 1;
         }
     }
 
@@ -481,6 +542,7 @@ fn build_cpu_info(
         numa_node_count,
         kind_core_counts,
         l3_domains,
+        l2_domains,
         l1d,
         l1i,
         l2,

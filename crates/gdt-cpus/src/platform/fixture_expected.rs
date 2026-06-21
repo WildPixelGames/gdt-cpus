@@ -18,7 +18,18 @@ use crate::{CoreKind, CpuInfo, Lp};
 // TODO(aljen): Remove hardcoded candidates
 fn fixture_base() -> PathBuf {
     if let Some(path) = std::env::var_os("GDT_CPUS_FIXTURES") {
-        return PathBuf::from(path);
+        let base = PathBuf::from(path);
+        // A wrong GDT_CPUS_FIXTURES would otherwise skip every fixture while each
+        // test still reports `ok` (a skip is a pass) - a false green. Setting the
+        // var at all is intent to validate, so a missing path fails loudly; an
+        // unset var still falls through to the skip path below for checkouts that
+        // genuinely lack the corpus.
+        assert!(
+            base.is_dir(),
+            "GDT_CPUS_FIXTURES is set to {} which is not a directory",
+            base.display()
+        );
+        return base;
     }
 
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -85,6 +96,46 @@ pub(crate) fn assert_invariants(info: &CpuInfo) {
             );
         }
     }
+
+    // L2 domains: disjoint, ordered by ascending lowest member LP, and each one
+    // nests inside the L3 domain its `l3_domain` link names.
+    let mut prev_first: Option<usize> = None;
+    for (i, a) in info.l2_domains.iter().enumerate() {
+        for b in info.l2_domains.iter().skip(i + 1) {
+            assert!(
+                a.mask.intersection(&b.mask).is_empty(),
+                "L2 domains must be disjoint"
+            );
+        }
+
+        let first = a.mask.iter().next().expect("L2 domain has no members");
+        if let Some(p) = prev_first {
+            assert!(
+                p < first,
+                "l2_domains must be ordered by ascending lowest LP"
+            );
+        }
+        prev_first = Some(first);
+
+        if a.l3_domain != Lp::NO_L3 {
+            let parent = &info.l3_domains[a.l3_domain as usize].mask;
+            for id in a.mask.iter() {
+                assert!(parent.contains(id), "L2 domain not nested in its parent L3");
+            }
+        }
+    }
+
+    for lp in &info.lps {
+        if lp.l2_domain != Lp::NO_L2 {
+            assert!(
+                info.l2_domains[lp.l2_domain as usize]
+                    .mask
+                    .contains(lp.os_id as usize),
+                "lp {} not covered by its own L2 domain",
+                lp.os_id
+            );
+        }
+    }
 }
 
 fn lp_by_os_id(info: &CpuInfo, os_id: usize) -> &Lp {
@@ -125,6 +176,7 @@ fn check_key(info: &CpuInfo, key: &str, value: &str, fixture: &str) {
         ["socket_count"] => info.socket_count.to_string(),
         ["numa_node_count"] => info.numa_node_count.to_string(),
         ["l3_domain_count"] => info.l3_domains.len().to_string(),
+        ["l2_domain_count"] => info.l2_domains.len().to_string(),
         ["kind", kind] => info.kind_core_counts[kind_by_name(kind).index()].to_string(),
         ["l3", n, field] => {
             let d = &info.l3_domains[n.parse::<usize>().unwrap()];
@@ -156,6 +208,45 @@ fn check_key(info: &CpuInfo, key: &str, value: &str, fixture: &str) {
                     return;
                 }
                 other => panic!("unknown l3 field: {}", other),
+            }
+        }
+        ["l2_domain", n, field] => {
+            let d = &info.l2_domains[n.parse::<usize>().unwrap()];
+
+            match *field {
+                "size_bytes" => d.size_bytes.to_string(),
+                "core_count" => d.core_count.to_string(),
+                "l3_domain" => {
+                    if d.l3_domain == Lp::NO_L3 {
+                        "none".to_string()
+                    } else {
+                        d.l3_domain.to_string()
+                    }
+                }
+                "lps" => {
+                    let want = parse_range_list_str(value).unwrap();
+
+                    for id in &want {
+                        assert!(
+                            d.mask.contains(*id),
+                            "{}: l2_domain.{}.lps missing {}",
+                            fixture,
+                            n,
+                            id
+                        );
+                    }
+
+                    assert_eq!(
+                        d.mask.count(),
+                        want.len(),
+                        "{}: l2_domain.{}.lps cardinality",
+                        fixture,
+                        n
+                    );
+
+                    return;
+                }
+                other => panic!("unknown l2_domain field: {}", other),
             }
         }
         [cache @ ("l1d" | "l1i" | "l2"), kind, field] => {
@@ -193,6 +284,13 @@ fn check_key(info: &CpuInfo, key: &str, value: &str, fixture: &str) {
                         "none".to_string()
                     } else {
                         lp.l3_domain.to_string()
+                    }
+                }
+                "l2_domain" => {
+                    if lp.l2_domain == Lp::NO_L2 {
+                        "none".to_string()
+                    } else {
+                        lp.l2_domain.to_string()
                     }
                 }
                 other => panic!("unknown lp field: {}", other),

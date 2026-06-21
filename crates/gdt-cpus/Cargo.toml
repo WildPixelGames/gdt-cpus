@@ -1,6 +1,6 @@
 [package]
 name = "gdt-cpus"
-version = "0.2606.0"
+version = "0.2606.1"
 authors = ["Artur Wyszyński <artur.wyszynski@wildpixelgames.com>"]
 license = "MIT OR Apache-2.0"
 description = "Game Developer's Toolkit for CPU Management"
@@ -68,6 +68,10 @@ path = "examples/frame_jitter.rs"
 [[example]]
 name = "l3_domains"
 path = "examples/l3_domains.rs"
+
+[[example]]
+name = "l2_domains"
+path = "examples/l2_domains.rs"
 
 [[example]]
 name = "background_budget"

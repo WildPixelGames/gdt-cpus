@@ -39,6 +39,9 @@ use gdt_cpus::{AffinityMask, CoreKind, ThreadPriority};
 /// `l3_domain` value meaning "this LP belongs to no detected L3 domain".
 pub const GDT_CPUS_NO_L3: u32 = u32::MAX;
 
+/// `l2_domain` value meaning "this LP belongs to no detected L2 domain".
+pub const GDT_CPUS_NO_L2: u32 = u32::MAX;
+
 struct CpuInfoContainer {
     info: gdt_cpus::CpuInfo,
     model_name_storage: CString,
@@ -693,6 +696,8 @@ pub struct GdtCpusLp {
     pub socket: u32,
     /// Index into the L3-domain table, or `GDT_CPUS_NO_L3`.
     pub l3_domain: u32,
+    /// Index into the L2-domain table, or `GDT_CPUS_NO_L2`.
+    pub l2_domain: u32,
     /// OS NUMA node id (0 on single-node systems and macOS).
     pub numa_node: u32,
     /// Performance/efficiency classification of this LP's physical core.
@@ -726,6 +731,22 @@ pub struct GdtCpusL3Domain {
     pub lp_count: u32,
 }
 
+/// A set of cores sharing one L2 cache instance (the finest "these cores are
+/// closest" grouping - a core and its SMT siblings, or an efficiency-core
+/// cluster). Enumerate its LPs with [`gdt_cpus_get_l2_domain_lp`].
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GdtCpusL2Domain {
+    /// Size of this L2 instance in bytes.
+    pub size_bytes: u64,
+    /// Physical cores in this domain (SMT siblings counted once).
+    pub core_count: u32,
+    /// Logical processors in this domain.
+    pub lp_count: u32,
+    /// Index of the parent L3 domain these cores share, or `GDT_CPUS_NO_L3`.
+    pub l3_domain: u32,
+}
+
 /// Top-level CPU summary. Per-LP records, L3 domains and per-kind caches are
 /// read through the accessor functions.
 #[repr(C)]
@@ -748,6 +769,8 @@ pub struct GdtCpusCpuInfo {
     pub numa_node_count: u64,
     /// Number of L3 cache domains (CCDs/clusters).
     pub l3_domain_count: u64,
+    /// Number of L2 cache domains.
+    pub l2_domain_count: u64,
     /// Physical cores classified as Performance.
     pub performance_cores: u64,
     /// Physical cores classified as Efficiency.
@@ -860,6 +883,7 @@ pub unsafe extern "C" fn gdt_cpus_cpu_info(out_info: *mut GdtCpusCpuInfo) -> i32
             socket_count: info.socket_count as u64,
             numa_node_count: info.numa_node_count as u64,
             l3_domain_count: info.l3_domains.len() as u64,
+            l2_domain_count: info.l2_domains.len() as u64,
             performance_cores: info.num_performance_cores() as u64,
             efficiency_cores: info.num_efficiency_cores() as u64,
             lp_efficiency_cores: info.num_lp_efficiency_cores() as u64,
@@ -899,6 +923,11 @@ pub unsafe extern "C" fn gdt_cpus_get_lp(index: u64, out_lp: *mut GdtCpusLp) -> 
                 GDT_CPUS_NO_L3
             } else {
                 lp.l3_domain as u32
+            },
+            l2_domain: if lp.l2_domain == gdt_cpus::Lp::NO_L2 {
+                GDT_CPUS_NO_L2
+            } else {
+                lp.l2_domain as u32
             },
             numa_node: lp.numa_node as u32,
             kind: lp.kind.into(),
@@ -947,6 +976,57 @@ pub unsafe extern "C" fn gdt_cpus_get_l3_domain_lp(
 ) -> i32 {
     let c = get_info_validate_out_or_err!(out_os_id);
     let Some(d) = c.info.l3_domains.get(domain_index as usize) else {
+        return GdtCpusErrorCode::OutOfBounds as i32;
+    };
+    let Some(os_id) = d.mask.iter().nth(lp_index as usize) else {
+        return GdtCpusErrorCode::OutOfBounds as i32;
+    };
+    unsafe { *out_os_id = os_id as u32 };
+    GdtCpusErrorCode::Success as i32
+}
+
+/// Fills `out_domain` with the L2 domain at `index` (`0..l2_domain_count`).
+///
+/// # Safety
+/// `out_domain` must point to a valid `GdtCpusL2Domain`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdt_cpus_get_l2_domain(
+    index: u64,
+    out_domain: *mut GdtCpusL2Domain,
+) -> i32 {
+    let c = get_info_validate_out_or_err!(out_domain);
+    let Some(d) = c.info.l2_domains.get(index as usize) else {
+        return GdtCpusErrorCode::OutOfBounds as i32;
+    };
+    unsafe {
+        *out_domain = GdtCpusL2Domain {
+            size_bytes: d.size_bytes,
+            core_count: d.core_count as u32,
+            lp_count: d.mask.count() as u32,
+            l3_domain: if d.l3_domain == gdt_cpus::Lp::NO_L3 {
+                GDT_CPUS_NO_L3
+            } else {
+                d.l3_domain as u32
+            },
+        };
+    }
+    GdtCpusErrorCode::Success as i32
+}
+
+/// Writes the OS id of the `lp_index`-th logical processor (ascending) of L2
+/// domain `domain_index`. Use with `GdtCpusL2Domain::lp_count` to enumerate a
+/// domain's LPs - e.g. to pin cooperating threads to one L2.
+///
+/// # Safety
+/// `out_os_id` must point to a valid `u32`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdt_cpus_get_l2_domain_lp(
+    domain_index: u64,
+    lp_index: u64,
+    out_os_id: *mut u32,
+) -> i32 {
+    let c = get_info_validate_out_or_err!(out_os_id);
+    let Some(d) = c.info.l2_domains.get(domain_index as usize) else {
         return GdtCpusErrorCode::OutOfBounds as i32;
     };
     let Some(os_id) = d.mask.iter().nth(lp_index as usize) else {

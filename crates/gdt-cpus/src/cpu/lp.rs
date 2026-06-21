@@ -2,9 +2,10 @@ use super::CoreKind;
 
 /// One record per ONLINE logical processor - the flat topology's atom.
 ///
-/// The whole machine is described by `Vec<Lp>` plus derived counts and the
-/// L3-domain table; there is no socket -> core nesting (a per-socket hierarchy
-/// cannot represent chiplet CPUs, where one socket carries several L3 domains).
+/// The whole machine is described by `Vec<Lp>` plus derived counts and the L3-
+/// and L2-domain tables; there is no socket -> core nesting (a per-socket
+/// hierarchy cannot represent chiplet CPUs, where one socket carries several L3
+/// domains).
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Lp {
@@ -18,6 +19,11 @@ pub struct Lp {
     /// Index into [`crate::CpuInfo::l3_domains`], or [`Lp::NO_L3`] when the LP
     /// reports no L3 (e.g. Apple Silicon) or cache detection found none.
     pub l3_domain: u8,
+    /// Index into [`crate::CpuInfo::l2_domains`], or [`Lp::NO_L2`] when cache
+    /// detection found no L2 for this LP. Wider than [`l3_domain`](Self::l3_domain)
+    /// (u16 vs u8) because L2 instances scale with core count - one per a core or
+    /// two - so a large machine can have more than the 254 an `u8` allows.
+    pub l2_domain: u16,
     /// OS NUMA node id (0 on single-node systems and macOS).
     pub numa_node: u8,
     /// Performance/efficiency classification of this LP's physical core.
@@ -53,4 +59,6 @@ pub struct Lp {
 impl Lp {
     /// Sentinel for [`Lp::l3_domain`]: this LP belongs to no detected L3 domain.
     pub const NO_L3: u8 = 0xFF;
+    /// Sentinel for [`Lp::l2_domain`]: this LP belongs to no detected L2 domain.
+    pub const NO_L2: u16 = 0xFFFF;
 }

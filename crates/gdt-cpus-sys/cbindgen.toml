@@ -38,6 +38,7 @@ include = [
   "GdtCpusCpuInfo",
   "GdtCpusLp",
   "GdtCpusL3Domain",
+  "GdtCpusL2Domain",
   "GdtCpusVendor",
   "GdtCpusCoreKind",
   "GdtCpusThreadPriority",

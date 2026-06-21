@@ -18,7 +18,8 @@
 //! Every key is defaulted on absence - no panic paths.
 
 use crate::{
-    AffinityMask, CacheInfo, CoreKind, CpuFeatures, CpuInfo, Error, L3Domain, Lp, Result, Vendor,
+    AffinityMask, CacheInfo, CoreKind, CpuFeatures, CpuInfo, Error, L2Domain, L3Domain, Lp, Result,
+    Vendor,
 };
 
 /// The detection pipeline's read seam.
@@ -190,6 +191,8 @@ struct KindGroup {
     l3_size: u64,
     /// `hw.perflevelN.cpusperl3` - cores sharing one L3 instance.
     cpus_per_l3: usize,
+    /// `hw.perflevelN.cpusperl2` - cores sharing one L2 instance.
+    cpus_per_l2: usize,
 }
 
 fn read_perflevel(
@@ -244,6 +247,7 @@ fn read_perflevel(
         },
         l3_size,
         cpus_per_l3,
+        cpus_per_l2: cpus_per_l2 as usize,
     })
 }
 
@@ -314,6 +318,7 @@ pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
             },
             l3_size: direct("hw.l3cachesize"),
             cpus_per_l3: physical,
+            cpus_per_l2: physical,
         }];
     }
 
@@ -326,6 +331,7 @@ pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
     // cpus_per_l3 per domain.
     let mut lps: Vec<Lp> = Vec::with_capacity(logical);
     let mut l3_domains: Vec<L3Domain> = Vec::new();
+    let mut l2_domains: Vec<L2Domain> = Vec::new();
     let mut l1d = [CacheInfo::default(); CoreKind::COUNT];
     let mut l1i = [CacheInfo::default(); CoreKind::COUNT];
     let mut l2 = [CacheInfo::default(); CoreKind::COUNT];
@@ -348,6 +354,7 @@ pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
 
         let smt = (group.lps / group.cores).max(1);
         let group_domain_base = l3_domains.len();
+        let group_l2_base = l2_domains.len();
 
         for core_i in 0..group.cores {
             // hw.packages is 1 on all Apple Silicon; the even split is kept as
@@ -371,9 +378,34 @@ pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
                 Lp::NO_L3
             };
 
+            // L2 domains: chunk this group's cores into cpus_per_l2-sized groups.
+            let l2_domain = if group.l2.size_bytes > 0 && l2_domains.len() < usize::from(Lp::NO_L2)
+            {
+                let idx = group_l2_base + core_i / group.cpus_per_l2.max(1);
+
+                if idx == l2_domains.len() {
+                    l2_domains.push(L2Domain {
+                        size_bytes: group.l2.size_bytes,
+                        mask: AffinityMask::empty(),
+                        core_count: 0,
+                        l3_domain,
+                    });
+                }
+
+                l2_domains[idx].core_count += 1;
+
+                idx as u16
+            } else {
+                Lp::NO_L2
+            };
+
             for sibling in 0..smt {
                 if l3_domain != Lp::NO_L3 {
                     l3_domains[l3_domain as usize].mask.add(next_lp);
+                }
+
+                if l2_domain != Lp::NO_L2 {
+                    l2_domains[l2_domain as usize].mask.add(next_lp);
                 }
 
                 lps.push(Lp {
@@ -381,6 +413,7 @@ pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
                     core: next_core as u16,
                     socket,
                     l3_domain,
+                    l2_domain,
                     numa_node: 0,
                     kind: group.kind,
                     smt_index: sibling as u8,
@@ -404,6 +437,7 @@ pub(crate) fn detect_at(src: &impl SysctlSource) -> Result<CpuInfo> {
         numa_node_count: 1,
         kind_core_counts,
         l3_domains,
+        l2_domains,
         l1d,
         l1i,
         l2,

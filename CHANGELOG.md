@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2606.1] - 2026-06-21
+
+**Migration guide: [docs/migrations/MIGRATION-0.2606.1.md](docs/migrations/MIGRATION-0.2606.1.md)**.
+The Rust API is additive (no changes needed); the C ABI is a recompile.
+
+### 🚀 Features
+
+- First-class L2 cache domains (`L2Domain`, `CpuInfo::l2_domains`,
+  `CpuInfo::l2_domain_mask`), mirroring the L3 domain model (#10). Each domain
+  carries the cores sharing one L2 instance, its own `size_bytes` (so
+  heterogeneous L2 sizes are exact, not collapsed to a per-kind average), and a
+  `l3_domain` back-link to the L3 it nests inside - the finest "these cores are
+  closest" grouping for slicing cooperating threads out of an L3 domain.
+  Domains are ordered by ascending lowest member LP (stable, not a formal
+  distance guarantee). New per-LP `Lp::l2_domain` index (`u16`, `Lp::NO_L2`
+  sentinel; wider than `l3_domain` because L2 instances scale with core count).
+- C ABI: `GdtCpusL2Domain`, `GdtCpusCpuInfo::l2_domain_count`,
+  `GdtCpusLp::l2_domain`, `GDT_CPUS_NO_L2`, and `gdt_cpus_get_l2_domain` /
+  `gdt_cpus_get_l2_domain_lp` accessors.
+- New `l2_domains` example: pack N cooperating cores into the tightest cache
+  neighborhood by taking whole L2 groups out of an L3 domain. `basic_info` now
+  lists L2 domains and each LP's L2 domain, and prints domain membership as
+  ranges.
+- `impl Extend<usize> for AffinityMask`; `FromIterator` now delegates to it, and
+  out-of-range ids (`>= MAX_LP_COUNT`) are silently dropped (#11).
+
+### 🚜 Refactor
+
+- `AffinityMask` `Debug` and `Display` now render logical-processor sets as
+  coalesced bracketed ranges. `Debug` is the developer view
+  (`AffinityMask { cores: [0-3, 6-9], count: N }`); `Display` is the bare value
+  (`[0-3, 6-9]`, `[]` when empty), so a mask can be printed with `{}` directly
+  (#9).
+
+### 📚 Documentation
+
+- Update the C example repository URLs.
+
+### ⚠️ Breaking (C ABI)
+
+- `GdtCpusLp` and `GdtCpusCpuInfo` grew fields (`l2_domain`, `l2_domain_count`),
+  so their `#[repr(C)]` layout changed. Recompile C consumers against the
+  regenerated `gdt_cpus.h`.
+
+### 🧹 Maintenance
+
+- Bump license copyright year to 2024-2026.
+
 ## [0.2606.0] - 2026-06-18
 
 **Migration guide: [docs/migrations/MIGRATION-0.2606.md](docs/migrations/MIGRATION-0.2606.md)**.

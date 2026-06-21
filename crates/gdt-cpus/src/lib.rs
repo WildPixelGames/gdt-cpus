@@ -146,7 +146,7 @@ mod realtime;
 pub use affinity::*;
 pub use affinity_mask::AffinityMask;
 pub use capabilities::{PriorityCaps, priority_capabilities};
-pub use cpu::{CacheInfo, CoreKind, CpuFeatures, CpuInfo, L3Domain, Lp, Vendor};
+pub use cpu::{CacheInfo, CoreKind, CpuFeatures, CpuInfo, L2Domain, L3Domain, Lp, Vendor};
 pub use error::{Error, Result};
 pub use priority::{
     AppliedPriority, BrokerError, FallbackReason, Grant, Mechanism, MechanismPolicy, QosClass,

@@ -1,4 +1,6 @@
-use crate::{AffinityMask, CacheInfo, CoreKind, CpuFeatures, L3Domain, Lp, Result, Vendor};
+use crate::{
+    AffinityMask, CacheInfo, CoreKind, CpuFeatures, L2Domain, L3Domain, Lp, Result, Vendor,
+};
 
 /// The system's CPU topology and identity - a flat, by-value description.
 ///
@@ -27,6 +29,13 @@ pub struct CpuInfo {
 
     /// L3 cache domains (CCDs / clusters), content-keyed during detection.
     pub l3_domains: Vec<L3Domain>,
+    /// L2 cache domains (the cores sharing each L2 instance), content-keyed
+    /// during detection. Ordered by ascending lowest member LP id - a stable,
+    /// reproducible order that usually matches the topology's grouping, but is
+    /// not a formal physical-distance guarantee. The finest "these cores are
+    /// closest" signal: slice cooperating threads out of an [`l3_domains`](Self::l3_domains)
+    /// entry by taking whole L2 domains (filter by [`L2Domain::l3_domain`]).
+    pub l2_domains: Vec<L2Domain>,
     /// L1 data cache per core kind, indexed by [`CoreKind::index()`].
     pub l1d: [CacheInfo; CoreKind::COUNT],
     /// L1 instruction cache per core kind.
@@ -152,6 +161,14 @@ impl CpuInfo {
     /// Mask of the LPs in L3 domain `domain` (index into [`CpuInfo::l3_domains`]).
     pub fn l3_domain_mask(&self, domain: u8) -> AffinityMask {
         self.l3_domains
+            .get(domain as usize)
+            .map(|d| d.mask)
+            .unwrap_or_else(AffinityMask::empty)
+    }
+
+    /// Mask of the LPs in L2 domain `domain` (index into [`CpuInfo::l2_domains`]).
+    pub fn l2_domain_mask(&self, domain: u16) -> AffinityMask {
+        self.l2_domains
             .get(domain as usize)
             .map(|d| d.mask)
             .unwrap_or_else(AffinityMask::empty)

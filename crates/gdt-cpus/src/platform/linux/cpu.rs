@@ -20,7 +20,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::{
-    AffinityMask, CacheInfo, CoreKind, CpuFeatures, CpuInfo, Error, L3Domain, Lp, Result, Vendor,
+    AffinityMask, CacheInfo, CoreKind, CpuFeatures, CpuInfo, Error, L2Domain, L3Domain, Lp, Result,
+    Vendor,
 };
 
 use super::utils::{parse_range_list_str, parse_range_list_with};
@@ -147,6 +148,7 @@ pub(crate) fn detect_at(sysfs_root: &Path, procfs_root: &Path) -> Result<CpuInfo
             core: core_idx,
             socket: socket_idx,
             l3_domain: Lp::NO_L3,
+            l2_domain: Lp::NO_L2,
             numa_node: 0,
             kind,
             smt_index,
@@ -272,6 +274,90 @@ pub(crate) fn detect_at(sysfs_root: &Path, procfs_root: &Path) -> Result<CpuInfo
     for lp in &lps {
         if lp.smt_index == 0 && lp.l3_domain != Lp::NO_L3 {
             l3_domains[lp.l3_domain as usize].core_count += 1;
+        }
+    }
+
+    // --- 4b. L2 domains, content-keyed (the step-4 loop at level 2) ---
+    // NOTE(lifecycle): the ascending-lowest-LP order of `l2_domains` comes from
+    // iterating `lps` in ascending os_id order (the online enumeration); a domain
+    // is first seen at its lowest member, so new domains append in that order.
+    let mut l2_domains: Vec<L2Domain> = Vec::new();
+    let mut l2_first_lp: Vec<usize> = Vec::new();
+
+    for lp in lps.iter_mut() {
+        for index in 0..10u32 {
+            let idx_base = cpu_base.join(format!("cpu{}/cache/index{}", lp.os_id, index));
+
+            let level = match read_u64(&idx_base.join("level")) {
+                Some(l) => l,
+                None => break,
+            };
+
+            if level != 2 {
+                continue;
+            }
+
+            if read_str(&idx_base.join("type")).is_some_and(|t| t != "Unified") {
+                continue;
+            }
+
+            let shared = match read_str(&idx_base.join("shared_cpu_list")) {
+                Some(s) => s,
+                None => break,
+            };
+
+            let mut mask = AffinityMask::empty();
+            let mut first: Option<usize> = None; // lowest member = the L2 content key
+
+            if parse_range_list_with(&shared, |id| {
+                mask.add(id);
+                first = Some(first.map_or(id, |f| f.min(id)));
+            })
+            .is_err()
+            {
+                break;
+            }
+
+            let Some(first) = first else {
+                break;
+            };
+
+            let domain = match l2_first_lp.iter().position(|&k| k == first) {
+                Some(d) => d,
+                None => {
+                    // Cap BEFORE pushing: NO_L2 (0xFFFF) is the "no L2 domain"
+                    // sentinel, so the last usable index is 0xFFFE.
+                    if l2_domains.len() >= Lp::NO_L2 as usize {
+                        break;
+                    }
+
+                    let size = read_str(&idx_base.join("size"))
+                        .map(|s| parse_cache_size(&s))
+                        .unwrap_or(0);
+
+                    l2_first_lp.push(first);
+                    l2_domains.push(L2Domain {
+                        size_bytes: size,
+                        mask,
+                        core_count: 0,
+                        // Every member of this L2 shares one L3; take it from the
+                        // current (member) LP, already stamped by step 4.
+                        l3_domain: lp.l3_domain,
+                    });
+
+                    l2_domains.len() - 1
+                }
+            };
+
+            lp.l2_domain = domain as u16;
+
+            break;
+        }
+    }
+
+    for lp in &lps {
+        if lp.smt_index == 0 && lp.l2_domain != Lp::NO_L2 {
+            l2_domains[lp.l2_domain as usize].core_count += 1;
         }
     }
 
@@ -435,6 +521,7 @@ pub(crate) fn detect_at(sysfs_root: &Path, procfs_root: &Path) -> Result<CpuInfo
         numa_node_count,
         kind_core_counts,
         l3_domains,
+        l2_domains,
         l1d,
         l1i,
         l2,
